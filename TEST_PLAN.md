@@ -264,6 +264,17 @@ Maps each stated requirement to the cases that demonstrate it.
 To be completed once the suite runs. Paste real terminal output rather than a
 summary.
 
+NOTE: Below is the code to instantiate the test db
+
+Go to .env and set DATABASE_URL to this:
+DATABASE_URL=postgresql://policy:policy@localhost:5433/smartverify_test
+
+```
+docker exec smartverify-db createdb -U policy smartverify_test
+
+python backend/scripts/init_db.py
+```
+
 **Environment:**
 **Command:**
 **Date:**
@@ -320,3 +331,62 @@ the ones found at the end.
   grant is already committed and remains in the database. An assertion only
   prevents damage if it shares a transaction with the write it is checking.
   INV-01 stays in the suite regardless: the guard prevents, the test verifies.
+
+### BUG-03 — `init_db.py` reported failure over a fully seeded database
+
+- **Found by:** running `init_db.py` after refactoring it, while the script still
+  called a helper that had been moved into `seed.sql`.
+- **Symptom:** the script printed `Failed: name 'check_no_cross_customer_grants'
+is not defined` and exited 1, implying nothing had been applied. The database
+  was in fact fully populated — 3 users, 4 grants, 3 tenants, 2 customers.
+- **Cause:** two separate issues. The leftover call was a stale reference. The
+  misleading report was more interesting: `schema.sql` and `seed.sql` each carry
+  their own `BEGIN`/`COMMIT`, so both had already committed inside the connection
+  before Python raised. The `with psycopg.connect(...)` context manager had
+  nothing left to roll back.
+- **Fix:** removed the stale call. Corrected the mistaken assumption that the
+  connection context manager makes the two files atomic as a unit — it does not.
+- **Lesson recorded:** an exit code from the script describes the script, not the
+  database. Anything needing to prevent a bad write must run inside the
+  transaction that performs it, which is why the cross-customer guard lives in
+  `seed.sql` rather than in Python.
+
+### BUG-04 — Empty and comment-only files pass Cedar validation
+
+- **Found by:** spiking `cedarpy` against sample files before writing the upload
+  path.
+- **Symptom:** an empty file, a whitespace-only file and a comments-only file all
+  parse successfully. `PolicySet.from_str("")` returns without error.
+- **Cause:** an empty policy set is syntactically valid Cedar. The parser is
+  behaving correctly; the assumption that "parses successfully" implies "is a
+  usable policy file" was wrong.
+- **Impact if unfixed:** CED-05 would have failed, and the service would have
+  accepted policy files granting and forbidding nothing.
+- **Fix:** `app/cedar.py` adds an explicit check after parsing. The parser exposes
+  no policy count, so the policy set is serialised with `policies_to_json_str`
+  and its `staticPolicies` counted; zero is rejected with a distinct message.
+- **Regression test:** CED-05, plus fixtures `invalid/empty.cedar` and
+  `invalid/comments-only.cedar`.
+
+### BUG-05 — Design document claimed Cedar errors include position information
+
+- **Found by:** the same `cedarpy` spike.
+- **Symptom:** DESIGN.md decision 10 justified parse-level validation partly on
+  the grounds that "the parser's error already includes position information".
+  It does not. Errors are a single string with no line or column:
+
+  ```
+  missing semicolon  ->  unexpected end of input
+  typo in keyword    ->  invalid policy effect: permitt
+  unbalanced brace   ->  unexpected token `;`
+  ```
+
+- **Cause:** an assumption about the library recorded as fact before it was
+  verified.
+- **Impact:** documentation defect rather than a code defect. The decision still
+  holds — the messages name the offending token and are actionable — but the
+  stated reasoning was wrong, and CED-03 expected the response body to identify
+  _where_ the error is.
+- **Fix required:** reword DESIGN.md decision 10 and CED-03 to match observed
+  behaviour. Reporting a line number would mean locating the token in the source
+  ourselves; recorded as a possible improvement rather than a requirement.
