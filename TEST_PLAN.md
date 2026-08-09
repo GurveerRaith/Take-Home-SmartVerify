@@ -304,10 +304,19 @@ the ones found at the end.
   confirming against the database with a "who can see what" query after seeding.
 - **Symptom:** the comment in `seed.sql` described Alice as having Globex
   production _and_ staging, and Bob as having production only. The actual rows
-  gave Alice one grant and Bob two:
+  gave Alice one grant and Bob two.
 - **Cause:** the grant rows were assigned to the wrong user UUIDs — the staging
   grant went to Bob instead of Alice.
 - **Fix:** moved the `staging` grant from Bob to Alice so the data matches the
   documented fixture.
 - **Regression test:** AUTH-05, AUTH-06, ISO-03 — each asserts an exact grant
   count or an expected denial, so an inverted fixture fails them directly.
+- **Follow-up (done):** `seed.sql` now ends with a `DO` block that counts grants
+  where the user's `customer_id` differs from the tenant's and raises if any
+  exist, so a bad fixture aborts seeding rather than surfacing later as a
+  confusing test failure.
+- **Placement note:** the guard sits _above_ the `COMMIT`, deliberately. Verified
+  both ways — placed below the `COMMIT` it raises the same error, but the bad
+  grant is already committed and remains in the database. An assertion only
+  prevents damage if it shares a transaction with the write it is checking.
+  INV-01 stays in the suite regardless: the guard prevents, the test verifies.

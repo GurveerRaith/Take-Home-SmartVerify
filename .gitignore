@@ -1,1 +1,8 @@
-policies/
+backend/policy-repo/*
+.venv/
+__pycache__/
+node_modules/
+
+.env
+
+.claude/
