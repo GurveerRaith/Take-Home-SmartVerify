@@ -1,4 +1,6 @@
-backend/policy-repo/*
+# Git repository holding policy file content. Created at runtime; never
+# committed to this repository.
+data/policy-repo/
 .venv/
 __pycache__/
 node_modules/

@@ -165,10 +165,14 @@ Running from cold is worth doing periodically — it is what a reviewer will do.
 
 ## Configuration
 
-Settings live in [.env](.env) at the repository root. The credentials are
-deliberately fake and the file is committed so that a fresh clone runs with no
-setup; in a real deployment it would be gitignored and supplied by the
-environment.
+Settings live in `.env` at the repository root. The credentials are local
+development values only.
+
+`.env` is gitignored, following the usual practice of keeping configuration out
+of version control. It is included in the distributed archive, so no setup is
+needed. Every value below also has a fallback — `docker-compose.yml` uses
+`${VAR:-default}` substitution and `init_db.py` keeps a `DEFAULT_DSN` — so the
+stack still starts correctly if `.env` is absent.
 
 | Variable            | Purpose                       | Default                |
 | ------------------- | ----------------------------- | ---------------------- |
@@ -207,7 +211,9 @@ backend/
   tests/              test suite (not yet implemented)
   requirements.txt
 frontend/             React UI (not yet implemented)
-data/                 Git policy repository (created at runtime)
+data/
+  policy-repo/        Git repository holding policy file content
+                      (created at runtime, not committed)
 docker-compose.yml    PostgreSQL service
 .env                  local development configuration
 ```
