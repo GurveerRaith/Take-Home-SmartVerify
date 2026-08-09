@@ -1,12 +1,16 @@
-"""Reset the development database.
+"""Reset the development environment.
 
-Drops and recreates every table from schema.sql, then loads seed.sql.
-Destructive by design: all data in the target database is lost.
+Drops and recreates every table from schema.sql, loads seed.sql, then
+recreates the Git repository that holds policy file content.
+Destructive by design: all data in the target database is lost, and the
+policy repository is deleted and rebuilt.
 
 Usage:  python backend/scripts/init_db.py
 """
 
 import os
+import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -21,6 +25,7 @@ BACKEND_DIR = Path(__file__).resolve().parent.parent
 SCHEMA_FILE = BACKEND_DIR / "db" / "schema.sql"
 SEED_FILE = BACKEND_DIR / "db" / "seed.sql"
 ENV_FILE = BACKEND_DIR.parent / ".env"
+POLICY_REPO = BACKEND_DIR.parent / "data" / "policy-repo"
 
 # Docker Compose reads .env automatically; Python does not. Loading it here
 # means both sides take their configuration from the same file. The path is
@@ -87,12 +92,49 @@ def summarise(cur) -> None:
         print(f"  {email}: {tenant_count} tenant(s)")
 
 
+def run_git(*args: str) -> None:
+    """Run a git command inside the policy repository.
+
+    The return code is checked by hand rather than with check=True, because
+    CalledProcessError does not include stderr and git failures would come
+    out as an exit status with no reason attached.
+    """
+    result = subprocess.run(
+        ["git", *args], cwd=POLICY_REPO, capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
+
+
+def reset_policy_repo() -> None:
+    """Delete and recreate the Git repository that holds policy file content."""
+    # Guard against a wrong path constant turning this into a recursive
+    # delete of something else.
+    if POLICY_REPO.name != "policy-repo":
+        raise RuntimeError(f"refusing to delete unexpected path: {POLICY_REPO}")
+
+    shutil.rmtree(POLICY_REPO, ignore_errors=True)
+    POLICY_REPO.mkdir(parents=True)
+
+    run_git("init", "--initial-branch=main")
+    # Set locally, never with --global: this must not touch the user's own
+    # git identity. Without an identity configured the first commit fails.
+    run_git("config", "user.name", "SmartVerify Policy Service")
+    run_git("config", "user.email", "policy-service@smartverify.local")
+    # An empty first commit gives the repo a real HEAD. Without any commit
+    # HEAD is "unborn" and some git commands behave differently.
+    run_git("commit", "--allow-empty", "-m", "Initialise policy repository")
+
+    print(f"  initialised {POLICY_REPO}")
+
+
 def main() -> int:
     dsn = os.environ.get("DATABASE_URL", DEFAULT_DSN)
 
     # Show the target without the credentials.
     print(f"Resetting database at {dsn.rsplit('@', 1)[-1]}")
-    print("This DROPS ALL TABLES in that database.\n")
+    print("This DROPS ALL TABLES in that database, and rebuilds the")
+    print("policy repository from scratch.\n")
 
     try:
         wait_for_database(dsn)
@@ -101,6 +143,7 @@ def main() -> int:
                 run_sql_file(cur, SCHEMA_FILE)
                 run_sql_file(cur, SEED_FILE)
                 summarise(cur)
+        reset_policy_repo()
     except Exception as exc:
         print(f"\nFailed: {exc}", file=sys.stderr)
         return 1
