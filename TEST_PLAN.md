@@ -301,6 +301,7 @@ at the end.
 | BUG-03 | Init script reported failure over a fully seeded database | Fixed |
 | BUG-04 | Empty and comment-only files pass Cedar validation | Fixed |
 | BUG-05 | Design doc claimed Cedar errors include position info | Fixed |
+| BUG-06 | API unreachable after rebuilding the virtualenv | Fixed (environment) |
 
 ### BUG-01 — `seed.sql` aborted: column/value count mismatch
 
@@ -405,3 +406,38 @@ expected the body to identify *where*.
 **Fix:** reworded decision 10 and CED-03 to match observed behaviour. Reporting a
 line number would mean locating the token in the source ourselves; recorded as a
 possible improvement, not a requirement.
+
+### BUG-06 — API unreachable after rebuilding the virtualenv
+
+**Found by:** deleting `.venv`, reinstalling the dependencies, and then finding
+`curl localhost:8000/api/health` hung with no response.
+
+**Symptom:** the health endpoint timed out rather than refusing the connection.
+`lsof` showed a Python process holding port 8000 in the `CLOSED` state, and a new
+`uvicorn` refused to start with `[Errno 48] address already in use`. Both
+Postgres and the rebuilt virtualenv were healthy.
+
+**Cause:** the `uvicorn` server was still running from the *deleted* virtualenv.
+Removing `.venv` deletes the interpreter and packages out from under a live
+process; it does not stop it. The process survived in a broken state, still
+holding its socket, so the port was neither serving nor free. Reinstalling the
+dependencies had no effect, because the running process was not using them.
+
+A second, unrelated contributor: three orphaned `uvicorn` processes from earlier
+manual verification were still bound to other ports. They had been started in the
+background and the `kill %1` used to stop them referred to a job in a shell that
+had already exited, so it silently did nothing.
+
+**Fix:** stopped the stale process, then started the server with the documented
+command. `{"status":"ok"}` returned immediately. No application code was
+involved — the same command also worked before the change, confirming the import
+restructure was not the cause.
+
+**Prevention:** the README now says to stop the server before rebuilding the
+virtualenv, and documents `pkill -f uvicorn` for a background process.
+
+**Lesson:** "the API does not respond" has at least three distinct causes that
+look alike — nothing listening, something listening but broken, and something
+listening on a different port. `lsof -nP -iTCP:8000` distinguishes them
+immediately, and a *timeout* rather than *connection refused* is the signal that
+a process is holding the socket without serving.
