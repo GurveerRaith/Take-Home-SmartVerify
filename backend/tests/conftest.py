@@ -50,10 +50,31 @@ GLOBEX_PRODUCTION = "aaaaaaaa-0000-0000-0000-000000000001"
 GLOBEX_STAGING = "aaaaaaaa-0000-0000-0000-000000000002"
 INITECH_PRODUCTION = "bbbbbbbb-0000-0000-0000-000000000001"
 
+NONEXISTENT_UUID = "99999999-9999-9999-9999-999999999999"
+
+VALID_POLICY = b"permit(principal, action, resource);\n"
+
+# Kept in step with MAX_FILE_BYTES in backend/app/policies.py.
+MAX_UPLOAD_BYTES = 1024 * 1024
+
 
 def auth(token: str) -> dict:
     """Authorization header for a seeded token."""
     return {"Authorization": f"Bearer {token}"}
+
+
+def policies_url(tenant_id: str) -> str:
+    """Collection URL for one tenant's policy files."""
+    return f"/api/tenants/{tenant_id}/policies"
+
+
+def upload(client, tenant_id, token, filename, content=VALID_POLICY):
+    """Upload a policy file as the given user."""
+    return client.post(
+        policies_url(tenant_id),
+        headers=auth(token),
+        files={"file": (filename, content, "text/plain")},
+    )
 
 
 def read_fixture(name: str) -> bytes:
