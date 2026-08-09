@@ -15,7 +15,7 @@ is scoped per tenant.
 | Seed data            | Done        |
 | Dev init script      | Done        |
 | Cedar validation     | Done        |
-| Git storage layer    | Init only   |
+| Git storage layer    | Done        |
 | Backend API          | In progress |
 | Frontend             | Not started |
 
