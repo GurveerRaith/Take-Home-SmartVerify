@@ -11,3 +11,19 @@ psycopg[binary]==3.3.4
 # Loads .env into the environment. Docker Compose reads .env on its own;
 # Python does not, so this keeps both sides reading the same file.
 python-dotenv==1.2.2
+
+# Cedar policy language bindings (Python wrapper around the Rust
+# implementation). Used to parse and validate uploaded policy files.
+cedarpy==4.8.7
+
+# Web framework and ASGI server for the API.
+fastapi==0.141.1
+uvicorn[standard]==0.52.1
+
+# FastAPI needs this to accept multipart/form-data, which is how policy
+# files are uploaded.
+python-multipart==0.0.32
+
+# Test suite. httpx backs FastAPI's TestClient.
+pytest==9.1.1
+httpx==0.28.1
