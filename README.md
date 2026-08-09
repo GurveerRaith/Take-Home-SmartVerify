@@ -11,15 +11,15 @@ serves as the query index. Access is scoped per tenant.
 
 ## Status
 
-| Component               | State                              |
-| ----------------------- | ---------------------------------- |
-| Database schema         | Done                               |
-| Seed data               | Done                               |
-| Database init script    | Done                               |
-| Backend API             | Not started                        |
-| Cedar validation        | Not started                        |
-| Git storage layer       | Not started                        |
-| Frontend                | Not started                        |
+| Component            | State       |
+| -------------------- | ----------- |
+| Database schema      | Done        |
+| Seed data            | Done        |
+| Database init script | Done        |
+| Backend API          | Not started |
+| Cedar validation     | Started     |
+| Git storage layer    | Started     |
+| Frontend             | Not started |
 
 Everything below describes what currently runs.
 
@@ -67,10 +67,12 @@ never races the database.
 docker compose up -d --wait
 ```
 
-**4. Create the schema and load the seed data.**
+**4. Create the Git repo + schema and load the seed data.**
+
+This basically instantiates the creation of the database with seeded users and an empty Git repo
 
 ```bash
-python backend/scripts/init_db.py
+python backend/scripts/init_dev.py
 ```
 
 Expected output:
@@ -110,7 +112,7 @@ distinguishable from "different customer".
 | `carol@initech.example` | Initech  | `initech/production`                  | `carol_token` |
 
 Both customers have a tenant named `production`, deliberately — it proves Git
-paths are built from customer *and* tenant rather than tenant alone.
+paths are built from customer _and_ tenant rather than tenant alone.
 
 ---
 
@@ -174,13 +176,13 @@ needed. Every value below also has a fallback — `docker-compose.yml` uses
 `${VAR:-default}` substitution and `init_db.py` keeps a `DEFAULT_DSN` — so the
 stack still starts correctly if `.env` is absent.
 
-| Variable            | Purpose                       | Default                |
-| ------------------- | ----------------------------- | ---------------------- |
-| `POSTGRES_USER`     | Database user                 | `policy`               |
-| `POSTGRES_PASSWORD` | Database password             | `policy`               |
-| `POSTGRES_DB`       | Database name                 | `smartverify`          |
-| `POSTGRES_PORT`     | Host port for Postgres        | `5433`                 |
-| `DATABASE_URL`      | Connection string for Python  | see `.env`             |
+| Variable            | Purpose                      | Default       |
+| ------------------- | ---------------------------- | ------------- |
+| `POSTGRES_USER`     | Database user                | `policy`      |
+| `POSTGRES_PASSWORD` | Database password            | `policy`      |
+| `POSTGRES_DB`       | Database name                | `smartverify` |
+| `POSTGRES_PORT`     | Host port for Postgres       | `5433`        |
+| `DATABASE_URL`      | Connection string for Python | see `.env`    |
 
 Port 5433 rather than 5432 so the container never collides with a Postgres
 already running on the host.
