@@ -1,291 +1,183 @@
 # Test Plan
 
-Test cases for the SmartVerify policy file service.
+## Running the tests
 
-Status legend: `—` not yet run · `PASS` · `FAIL` · `N/A`
-Priority: **P0** must pass to submit · **P1** important · **P2** stretch
+The suite runs against a separate database so it never touches development
+data. Create it once:
 
----
+```bash
+docker exec smartverify-db createdb -U policy smartverify_test
+```
 
-## Assumptions
+Then, from the repository root:
 
-These are the decisions the plan is written against. If any change, the affected
-cases change with them.
+```bash
+pytest
+```
 
-- Authentication is a bearer token seeded per user. There is no login flow and no
-  password. `Authorization: Bearer <token>`.
-- Tenant is addressed in the URL path: `/api/tenants/{tenant_id}/policies`.
-- A request for a tenant the user has no grant for returns **404**, not 403, so
-  that the API never confirms the existence of another tenant's resources.
-- Deletes are soft in Postgres (`deleted_at`) and remove the file from the Git
-  working tree, leaving the content in Git history.
-- Uploads write to Git first, then insert the metadata row.
+`backend/tests/conftest.py` rebuilds the test database from `schema.sql` and
+`seed.sql` before **every** test, and gives each test a throwaway Git
+repository, so no test can depend on another having run first.
 
 ---
 
-## Fixture data
+## Approach
 
-All cases below refer to this seed. It is designed so that each isolation
-scenario is expressible; in particular Bob exists so that "same customer, wrong
-tenant" can be tested separately from "different customer".
+The scenarios worth covering outnumber the tests worth writing. Rather than one
+test per scenario, related cases are grouped into parametrized tests: 15 test
+functions cover roughly 40 scenarios, and a failure still names the exact case.
 
-| Customer    | slug      | Tenants                 |
-| ----------- | --------- | ----------------------- |
-| Globex Inc  | `globex`  | `production`, `staging` |
-| Initech LLC | `initech` | `production`            |
+Weighting is deliberate. Tenant isolation is the hardest requirement, so it gets
+5 of the 15. Two of those (T-04 and T-06) exist to catch specific defects that
+every other test would pass through.
 
-| User                  | Customer | Granted tenants                       | Token         |
-| --------------------- | -------- | ------------------------------------- | ------------- |
-| alice@globex.example  | Globex   | `globex/production`, `globex/staging` | `alice_token` |
-| bob@globex.example    | Globex   | `globex/production` only              | `bob_token`   |
-| carol@initech.example | Initech  | `initech/production`                  | `carol_token` |
-
-Notes on why the fixture looks like this:
-
-- **Initech also has a tenant named `production`.** Two tenants sharing a folder
-  name across different customers proves the Git path is built from customer and
-  tenant together, and exercises the `UNIQUE (customer_id, folder_name)` constraint.
-- **Bob is deliberately under-privileged** relative to his own customer. Without
-  him, ISO-03 cannot be written, and a bug that authorises by customer instead of
-  by tenant grant would pass every other test.
-- **No `policy_files` rows are seeded.** Metadata rows carry a `commit_sha`; seeding
-  them without matching Git commits would make the two stores inconsistent from
-  initialisation. Files enter only through the upload path.
+Status legend: `—` not run · `PASS` · `FAIL`
+Priority: **P0** must pass to submit · **P1** important
 
 ---
 
-## 1. Authentication
+## Test suite
 
-| ID      | Pri | Scenario                                                        | Expected                              | Result |
-| ------- | --- | --------------------------------------------------------------- | ------------------------------------- | ------ |
-| AUTH-01 | P0  | Request with no `Authorization` header                          | 401                                   | —      |
-| AUTH-02 | P0  | Malformed header (`Bearer`, no token; wrong scheme)             | 401                                   | —      |
-| AUTH-03 | P0  | Well-formed but unknown token                                   | 401                                   | —      |
-| AUTH-04 | P0  | Valid token on `GET /api/me`                                    | 200, correct user identity            | —      |
-| AUTH-05 | P0  | `GET /api/me` as Alice                                          | lists exactly 2 tenants               | —      |
-| AUTH-06 | P0  | `GET /api/me` as Bob                                            | lists exactly 1 tenant, not `staging` | —      |
-| AUTH-07 | P1  | Token of a different user does not return the first user's data | correct identity per token            | —      |
-| AUTH-08 | P2  | Auth failure body contains no user or tenant details            | generic message only                  | —      |
+### Authentication
 
----
+| ID   | Pri | Test                                                                     | Asserts                                          | Result | Last run |
+| ---- | --- | ------------------------------------------------------------------------ | ------------------------------------------------ | ------ | -------- |
+| T-01 | P0  | Bad credentials rejected<br>*param:* no header, malformed header, unknown token | 401, and an identical body in all three cases | —      | —        |
+| T-02 | P0  | `/api/me` returns exactly the granted tenants<br>*param:* alice=2, bob=1, carol=1 | correct identity and tenant list per token  | —      | —        |
 
-## 2. Tenant isolation
+T-01 uses one message for every failure mode on purpose. Distinguishing "no
+token" from "unknown token" would tell a caller whether a token exists.
 
-The core requirement. Every case here is an attempt to reach another tenant's
-data with a hand-crafted request rather than through the UI.
+### Tenant isolation
 
-### 2.1 Read isolation
+| ID   | Pri | Test                                                                | Asserts                                       | Result | Last run |
+| ---- | --- | ------------------------------------------------------------------- | --------------------------------------------- | ------ | -------- |
+| T-03 | P0  | Carol lists `globex/production` — different customer                | 404                                           | —      | —        |
+| T-04 | P0  | **Bob lists `globex/staging`** — own customer, no grant             | 404                                           | —      | —        |
+| T-05 | P0  | Carol targets a real Globex file by exact UUID<br>*param:* GET, download, DELETE | 404 each; file still present afterwards | —      | —        |
+| T-06 | P0  | Valid file ID requested under the wrong tenant path                 | 404                                           | —      | —        |
+| T-07 | P0  | Upload to a tenant the caller was not granted                       | 404; no Git commit; no metadata row           | —      | —        |
 
-| ID     | Pri | Scenario                                                                                                    | Expected                                              | Result |
-| ------ | --- | ----------------------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ------ |
-| ISO-01 | P0  | Alice lists `globex/production`                                                                             | 200, only that tenant's files                         | —      |
-| ISO-02 | P0  | Alice lists `globex/staging`                                                                                | 200, only that tenant's files, no overlap with ISO-01 | —      |
-| ISO-03 | P0  | **Bob lists `globex/staging`** — own customer, no grant                                                     | 404                                                   | —      |
-| ISO-04 | P0  | **Carol lists `globex/production`** — different customer                                                    | 404                                                   | —      |
-| ISO-05 | P0  | Carol requests metadata for a Globex file by its exact UUID                                                 | 404                                                   | —      |
-| ISO-06 | P0  | Carol downloads a Globex file by its exact UUID                                                             | 404, no bytes returned                                | —      |
-| ISO-07 | P1  | Request for a tenant UUID that does not exist                                                               | 404                                                   | —      |
-| ISO-08 | P1  | Request with a malformed (non-UUID) tenant id                                                               | 422 or 400, not 500                                   | —      |
-| ISO-09 | P1  | **Valid file ID under the wrong tenant path**: Alice requests a `staging` file ID via the `production` path | 404                                                   | —      |
-| ISO-10 | P1  | `admin.cedar` exists in both `globex/production` and `initech/production`; each user downloads theirs       | distinct content, no cross-contamination              | —      |
+Why these two matter most:
 
-ISO-09 is the case that catches a lookup done by file ID alone. If the query is
-`WHERE id = ?` rather than `WHERE id = ? AND tenant_id = ?`, this is the test that
-fails.
+- **T-04** is the only test that fails if authorisation is done by *customer*
+  rather than by *tenant grant*. Bob exists in the fixture solely to make it
+  expressible.
+- **T-06** is the only test that fails if a file is looked up by `id` alone
+  instead of `WHERE id = ? AND tenant_id = ?`.
 
-### 2.2 Write isolation
+T-05 also asserts that the response for another tenant's real file is identical
+to the response for a file that does not exist — a difference would let a caller
+enumerate which IDs are real.
 
-| ID     | Pri | Scenario                                                        | Expected                                    | Result |
-| ------ | --- | --------------------------------------------------------------- | ------------------------------------------- | ------ |
-| ISO-11 | P0  | Carol uploads to `globex/production`                            | 404; nothing written to Git; no DB row      | —      |
-| ISO-12 | P0  | Carol deletes a Globex file by its exact UUID                   | 404; file still listed for Alice afterwards | —      |
-| ISO-13 | P0  | Bob uploads to `globex/staging` — own customer, no grant        | 404; nothing written                        | —      |
-| ISO-14 | P1  | After every rejected write above, `git log` shows no new commit | history unchanged                           | —      |
+### Cedar validation
 
-### 2.3 Information leakage
+| ID   | Pri | Test                                                          | Asserts                                             | Result | Last run |
+| ---- | --- | ------------------------------------------------------------- | --------------------------------------------------- | ------ | -------- |
+| T-08 | P0  | Valid policies accepted<br>*param:* all 4 `fixtures/valid/`    | 201, file retrievable                               | —      | —        |
+| T-09 | P0  | Invalid policies rejected<br>*param:* all 7 `fixtures/invalid/` | 400 (never 500), message names the actual problem | —      | —        |
 
-| ID     | Pri | Scenario                                                                            | Expected                  | Result |
-| ------ | --- | ----------------------------------------------------------------------------------- | ------------------------- | ------ |
-| ISO-15 | P1  | Compare response for a _nonexistent_ file ID vs another tenant's _real_ file ID     | identical status and body | —      |
-| ISO-16 | P2  | Error bodies never contain filenames, tenant names, or Git paths from other tenants | no leakage                | —      |
+The invalid fixtures cover syntax errors, non-Cedar prose, non-UTF-8 bytes, and
+the two cases that *parse successfully* but define nothing (empty and
+comments-only — see BUG-04).
 
-ISO-15 is the reason for choosing 404 over 403. If the two responses differ in
-any way, an attacker can enumerate which file IDs exist.
+### Upload rules
 
----
+| ID   | Pri | Test                                                                 | Asserts                                   | Result | Last run |
+| ---- | --- | -------------------------------------------------------------------- | ----------------------------------------- | ------ | -------- |
+| T-10 | P0  | Bad filenames rejected<br>*param:* `../`, `/`, `.txt`, leading dot, >255 chars | 400; nothing written outside the tenant directory | — | — |
+| T-11 | P0  | Duplicate live filename → 409; the same name after deletion → 201    | uniqueness scoped to live rows only       | —      | —        |
 
-## 3. Cedar validation
+T-11 is what the partial unique index exists for: uniqueness that applies to
+live files without permanently reserving a deleted name.
 
-| ID     | Pri | Scenario                                                            | Expected                                                             | Result |
-| ------ | --- | ------------------------------------------------------------------- | -------------------------------------------------------------------- | ------ |
-| CED-01 | P0  | Upload a syntactically valid Cedar policy                           | 201, file stored                                                     | —      |
-| CED-02 | P0  | Upload a file with a syntax error (missing semicolon)               | 400, rejected                                                        | —      |
-| CED-03 | P0  | The 400 body names the offending token (no line/column — see BUG-05) | actionable message                                                   | —      |
-| CED-04 | P0  | A rejected file leaves no Git commit and no DB row                  | both stores unchanged                                                | —      |
-| CED-05 | P1  | Upload an empty file                                                | 400 with a clear message, not a 500                                  | —      |
-| CED-06 | P1  | Upload a file of invalid UTF-8 bytes                                | 400, not a 500 or an unhandled decode error                          | —      |
-| CED-07 | P1  | Upload a file containing several policy statements                  | 201, accepted                                                        | —      |
-| CED-08 | P1  | Upload plain English prose with a `.cedar` extension                | 400                                                                  | —      |
-| CED-09 | P2  | Upload a policy with valid syntax but an unknown entity type        | documented behaviour (accepted — syntax-only validation is in scope) | —      |
+### Behaviour and consistency
 
-CED-09 records a deliberate scope decision rather than a defect: validation is
-parse-level, because schema validation would require a per-tenant Cedar schema
-that the requirements do not describe.
+| ID   | Pri | Test                                                                          | Asserts                                             | Result | Last run |
+| ---- | --- | ----------------------------------------------------------------------------- | --------------------------------------------------- | ------ | -------- |
+| T-12 | P0  | Full lifecycle: upload → appears in list → download → delete → gone from list  | download is byte-identical to upload                | —      | —        |
+| T-13 | P0  | The same filename in two tenants stays independent                            | each tenant gets its own content                    | —      | —        |
+| T-14 | P1  | Git content at the stored `commit_sha` matches the upload; a rejected upload leaves no commit and no row | both stores agree            | —      | —        |
+| T-15 | P0  | No cross-customer grants exist in `user_tenants`                              | zero rows                                           | —      | —        |
+
+T-14 is the only test that inspects **both** stores. Everything else could pass
+with a broken Git layer.
+
+T-15 is the compensating control for the invariant the schema does not enforce
+structurally — see DESIGN.md decision 4. It must not be skipped.
 
 ---
 
-## 4. Upload rules
+## Coverage mapping
 
-| ID     | Pri | Scenario                                                  | Expected                                          | Result |
-| ------ | --- | --------------------------------------------------------- | ------------------------------------------------- | ------ |
-| UPL-01 | P0  | Filename `notes.txt`                                      | 400, extension rejected                           | —      |
-| UPL-02 | P0  | Filename `../../etc/passwd.cedar`                         | 400, nothing written outside the tenant directory | —      |
-| UPL-03 | P0  | Filename containing `/`                                   | 400                                               | —      |
-| UPL-04 | P0  | Duplicate filename, same tenant, file still live          | 409                                               | —      |
-| UPL-05 | P0  | Same filename in a _different_ tenant                     | 201, allowed                                      | —      |
-| UPL-06 | P1  | Re-upload a filename after the original was deleted       | 201, allowed                                      | —      |
-| UPL-07 | P1  | Filename beginning with `.` (e.g. `.hidden.cedar`)        | 400                                               | —      |
-| UPL-08 | P1  | Filename longer than 255 characters                       | 400                                               | —      |
-| UPL-09 | P1  | File larger than the configured size limit                | 413                                               | —      |
-| UPL-10 | P1  | Request with no file attached                             | 422                                               | —      |
-| UPL-11 | P2  | Filename with unicode or spaces                           | 400, consistent with the documented pattern       | —      |
-| UPL-12 | P2  | Two concurrent uploads of the same filename to one tenant | exactly one 201, one 409; no duplicate rows       | —      |
+Every scenario originally enumerated, and the test that now covers it.
 
-UPL-12 is the case the partial unique index exists to win. The application's
-duplicate check can be raced; the database constraint cannot.
-
----
-
-## 5. CRUD behaviour
-
-| ID      | Pri | Scenario                                                                        | Expected                            | Result |
-| ------- | --- | ------------------------------------------------------------------------------- | ----------------------------------- | ------ |
-| CRUD-01 | P0  | Full lifecycle: upload → appears in list → download → delete → absent from list | each step succeeds                  | —      |
-| CRUD-02 | P0  | Downloaded bytes are identical to uploaded bytes                                | byte-for-byte match                 | —      |
-| CRUD-03 | P0  | Soft-deleted files are excluded from list responses                             | not present                         | —      |
-| CRUD-04 | P0  | Download a soft-deleted file by ID                                              | 404                                 | —      |
-| CRUD-05 | P1  | Delete the same file twice                                                      | second call 404                     | —      |
-| CRUD-06 | P1  | List response contains the expected metadata fields                             | filename, size, uploader, timestamp | —      |
-| CRUD-07 | P1  | List is served without reading Git                                              | Postgres alone answers the query    | —      |
-| CRUD-08 | P1  | List ordering is newest first and stable                                        | consistent order                    | —      |
-| CRUD-09 | P1  | Download response sets a filename in `Content-Disposition`                      | correct filename                    | —      |
-| CRUD-10 | P2  | List for a tenant with no files                                                 | 200 with an empty array, not 404    | —      |
-
-CRUD-07 verifies the stated architecture, not just the output: if listing touches
-Git, the claim that Postgres is the query index is not actually true.
+| Test | Scenarios covered                                              |
+| ---- | -------------------------------------------------------------- |
+| T-01 | no header, malformed header, unknown token, no detail leaked in error body |
+| T-02 | valid token identity, Alice's 2 tenants, Bob's 1 tenant, per-token isolation |
+| T-03 | cross-customer list denied                                     |
+| T-04 | same-customer ungranted tenant denied                          |
+| T-05 | cross-tenant metadata read, download, delete; identical responses for real vs nonexistent |
+| T-06 | valid file ID under the wrong tenant path                      |
+| T-07 | cross-tenant upload denied; Git history unchanged; no metadata row |
+| T-08 | single policy, multi-statement policy, conditional policy       |
+| T-09 | missing semicolon, misspelled effect, unbalanced brace, non-Cedar prose, non-UTF-8, empty file, comments-only |
+| T-10 | traversal filename, `/` in filename, wrong extension, leading dot, over-length |
+| T-11 | duplicate filename 409, name reuse after delete, DB-level uniqueness |
+| T-12 | upload, list, download fidelity, delete, exclusion of deleted rows |
+| T-13 | same filename across tenants, per-tenant content separation     |
+| T-14 | commit SHA resolves to the uploaded bytes, git_path correctness, one commit per upload, rejected upload leaves both stores clean |
+| T-15 | cross-customer grant invariant                                 |
 
 ---
 
-## 6. Git / Postgres consistency
+## Not automated
 
-| ID     | Pri | Scenario                                                                      | Expected                                                               | Result |
-| ------ | --- | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------- | ------ |
-| CON-01 | P0  | After upload, `git show <commit_sha>:<git_path>` returns the uploaded content | exact match                                                            | —      |
-| CON-02 | P0  | `git_path` equals `{customer_slug}/{tenant_slug}/{filename}`                  | correct path                                                           | —      |
-| CON-03 | P1  | After delete, the file is gone from the working tree but present in history   | recoverable from Git                                                   | —      |
-| CON-04 | P1  | Each successful upload produces exactly one commit                            | no empty or duplicate commits                                          | —      |
-| CON-05 | P1  | Commit message records the acting user                                        | audit trail usable                                                     | —      |
-| CON-06 | P2  | **Fault injection:** force the metadata insert to fail after the Git commit   | no metadata row; file invisible to the API; orphaned blob is tolerated | —      |
-| CON-07 | P2  | **Fault injection:** force the Git write to fail                              | no metadata row; no partial state                                      | —      |
-| CON-08 | P2  | Two concurrent uploads to different tenants                                   | both succeed; Git index not corrupted; both rows present               | —      |
+Identified, considered, and deliberately left out — with reasons.
 
-CON-06 is the test that justifies the write ordering. Git-first means a partial
-failure leaves invisible content rather than a broken download.
+| Scenario                        | Why not                                                              |
+| ------------------------------- | -------------------------------------------------------------------- |
+| Fault injection between the two stores | Requires patching mid-write to simulate a crash. The write ordering is argued in DESIGN.md decision 1; proving it needs machinery out of proportion to a take-home. |
+| Concurrent uploads of the same filename | The partial unique index makes the database the arbiter, so correctness does not depend on application timing. Reliable concurrency tests need process coordination. |
+| Frontend component tests        | Would add a JavaScript test toolchain for little marginal confidence. Covered by the manual checklist below. |
+| Malformed UUID in the path      | FastAPI rejects it with 422 before any application code runs; testing it would test the framework. |
 
 ---
 
-## 7. Database invariants
+## Manual UI checklist
 
-Tested directly against Postgres, independent of the API. These verify the
-guarantees the schema is supposed to provide on its own.
+Verified during the demo recording rather than automated.
 
-| ID     | Pri | Scenario                                                                                                      | Expected             | Result |
-| ------ | --- | ------------------------------------------------------------------------------------------------------------- | -------------------- | ------ |
-| INV-01 | P0  | **No cross-customer grants:** no row in `user_tenants` joins a user and a tenant with different `customer_id` | zero rows            | —      |
-| INV-02 | P0  | `schema.sql` applies cleanly to an empty database                                                             | no errors            | —      |
-| INV-03 | P0  | `schema.sql` is re-runnable                                                                                   | second run succeeds  | —      |
-| INV-04 | P1  | Direct insert of a traversal filename is rejected by the CHECK constraint                                     | rejected at DB level | —      |
-| INV-05 | P1  | Direct insert of a path-unsafe customer `folder_name` is rejected                                             | rejected at DB level | —      |
-| INV-06 | P1  | Two live rows with the same `(tenant_id, filename)` are rejected                                              | unique violation     | —      |
-| INV-07 | P1  | The same pair is permitted once the first is soft-deleted                                                     | insert succeeds      | —      |
-| INV-08 | P1  | Deleting a user removes their `user_tenants` rows                                                             | cascade              | —      |
-| INV-09 | P1  | Deleting a user who has uploaded files is refused                                                             | FK violation         | —      |
-| INV-10 | P1  | Deleting a tenant that still has files is refused                                                             | FK violation         | —      |
-
-INV-01 is the compensating control for the invariant the schema does not enforce
-structurally. A composite foreign key on `user_tenants` was considered and
-rejected as disproportionate; this test is what replaces it, so it must not be
-skipped.
-
-INV-04 and INV-05 matter because they hold even if the application layer is
-bypassed entirely.
-
----
-
-## 8. User interface
-
-Manual cases, verified during the demo recording.
-
-| ID    | Pri | Scenario                                       | Expected                                                 | Result |
-| ----- | --- | ---------------------------------------------- | -------------------------------------------------------- | ------ |
-| UI-01 | P0  | Sign in with a seeded token                    | reaches the file list                                    | —      |
-| UI-02 | P0  | Tenant switcher lists only granted tenants     | Bob sees one, Alice sees two                             | —      |
-| UI-03 | P0  | Switching tenant reloads the correct file list | list changes                                             | —      |
-| UI-04 | P0  | Upload an invalid Cedar file                   | the validation error is displayed, not a generic failure | —      |
-| UI-05 | P0  | Upload a valid file                            | appears in the list without a manual refresh             | —      |
-| UI-06 | P0  | Download a file from the list                  | file downloads with the right name and content           | —      |
-| UI-07 | P0  | Delete a file                                  | removed from the list                                    | —      |
-| UI-08 | P1  | Sign in with an invalid token                  | clear error, no access                                   | —      |
-| UI-09 | P1  | Sign out clears the stored token               | returns to sign-in                                       | —      |
-| UI-10 | P2  | Duplicate filename upload                      | the 409 is surfaced meaningfully                         | —      |
-
----
-
-## Requirements coverage
-
-Maps each stated requirement to the cases that demonstrate it.
-
-| Requirement                                       | Covered by                             |
-| ------------------------------------------------- | -------------------------------------- |
-| Git is the system of record for content           | CON-01, CON-02, CON-03, CRUD-02        |
-| Postgres holds metadata and serves listing        | CRUD-06, CRUD-07, CRUD-08              |
-| Tenant isolation enforced end to end              | all of §2, INV-01                      |
-| Isolation holds against hand-crafted API requests | ISO-05, ISO-06, ISO-09, ISO-11, ISO-12 |
-| Cedar validation before acceptance                | CED-01 – CED-08                        |
-| Invalid files rejected with an actionable message | CED-03, UI-04                          |
-| Authentication                                    | §1                                     |
-| Upload, list, download, delete                    | §5                                     |
-| Simple, fully functional interface                | §8                                     |
+| #   | Check                                                        | Result |
+| --- | ------------------------------------------------------------ | ------ |
+| M-1 | Sign in with a seeded token reaches the file list            | —      |
+| M-2 | Tenant switcher shows only granted tenants (Bob sees one)    | —      |
+| M-3 | Switching tenant reloads the correct file list               | —      |
+| M-4 | Uploading an invalid Cedar file shows the validation message | —      |
+| M-5 | Uploading a valid file updates the list without a refresh    | —      |
+| M-6 | Download returns the right filename and content              | —      |
+| M-7 | Delete removes the file from the list                        | —      |
 
 ---
 
 ## Execution report
 
-To be completed once the suite runs. Paste real terminal output rather than a
-summary.
+Paste real terminal output rather than a summary. Capture it with:
 
-NOTE: Below is the code to instantiate the test db
-
-Go to .env and set DATABASE_URL to this:
-DATABASE_URL=postgresql://policy:policy@localhost:5433/smartverify_test
-
-```
-docker exec smartverify-db createdb -U policy smartverify_test
-
-python backend/scripts/init_dev.py
+```bash
+pytest -v | tee test-output.txt
 ```
 
-**Environment:**
-**Command:**
-**Date:**
+**Environment:** PostgreSQL 16 (Docker), Python 3.14, pytest 9.1.1
+
+| Run | Date | Passed | Failed | Notes |
+| --- | ---- | ------ | ------ | ----- |
+|     |      |        |        |       |
 
 ```
 <pytest output>
 ```
-
-| Run | Date | Passed | Failed | Skipped | Notes |
-| --- | ---- | ------ | ------ | ------- | ----- |
-|     |      |        |        |         |       |
 
 ---
 
