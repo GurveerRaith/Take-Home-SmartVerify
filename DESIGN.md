@@ -26,6 +26,24 @@ API -> User: 201 + metadata
 
 ## Design Choices
 
+Each entry states what was considered, what was chosen, why, and what it costs.
+
+| #   | Decision              | Chose                                 | Over                            |
+| --- | --------------------- | ------------------------------------- | ------------------------------- |
+| 1   | Write ordering        | Git first, Postgres second            | Metadata first; 2PC             |
+| 2   | Isolation enforcement | Shared auth dependency + query filter | Per-endpoint checks; RLS        |
+| 3                       | Denying access        | 404                                  | 403                              |
+| 4                       | Cross-customer grants | Guard inside the seed transaction    | Composite foreign key            |
+| 5                       | Reading content       | By `commit_sha`                      | From the working tree            |
+| 6                       | Delete                | Soft delete + `git rm`               | Hard delete                      |
+| 7                       | Filename uniqueness   | Partial unique index                 | Plain unique constraint          |
+| 8                       | Path safety           | `CHECK` constraints + app validation | App validation only              |
+| 9                       | FK delete behaviour   | Chosen per relationship              | Uniform `CASCADE`; all defaults  |
+| 10                      | Cedar validation      | Parse-level + non-empty check        | Schema validation                |
+| 11                      | Authentication        | Seeded plaintext bearer tokens       | JWT + login; hashed tokens       |
+| 12                      | Schema management     | Re-runnable init script              | Alembic migrations               |
+| 13                      | Primary keys          | UUID                                 | `BIGSERIAL`                      |
+
 ### 1. Write ordering: Git before Postgres
 
 **Considered:** Writing the metadata row first then Git commit; Git commit first then
@@ -163,16 +181,14 @@ constraint with the check done in application code; a partial unique index.
 **Chose:** `CREATE UNIQUE INDEX ... ON policy_files (tenant_id, filename) WHERE
 deleted_at IS NULL`.
 
-**Why:** Soft delete and uniqueness conflict directly. A plain unique constraint
-counts deleted rows, so once a filename has been used it can never be used again
-in that tenant — surprising behaviour for a user who deletes a file and re-uploads
-it. Doing the check only in application code leaves a race between two concurrent
-uploads. The partial index resolves both: it applies only to live rows, so names
-free up on deletion, and it is still enforced by the database so a race produces
-a constraint violation rather than a duplicate.
+**Why:** Soft delete and uniqueness conflict. A plain constraint counts deleted
+rows, so a filename could never be reused after deletion. An application-only
+check leaves a race between concurrent uploads. The partial index solves both:
+it applies only to live rows, and the database still enforces it, so a race
+produces a constraint violation rather than a duplicate.
 
-**Cost:** Slightly less obvious than a plain constraint, and the predicate must
-match the one used in queries for the index to be used.
+**Cost:** Less obvious than a plain constraint, and the predicate must match the
+one used in queries for the index to be used.
 
 ### 8. Enforcing path safety in the database
 
@@ -218,21 +234,24 @@ rather than a single delete. That friction is intentional.
 **Considered:** Parse/syntax validation only; full schema validation against a
 Cedar schema; no validation beyond a file extension check.
 
-**Chose:** Parse validation using the `cedarpy` bindings, rejecting failures with
-the parser's own error message.
+**Chose:** Parse validation using the `cedarpy` bindings, plus an explicit check
+that the file defines at least one policy.
 
-**Why:** The requirement is that uploaded files are valid Cedar and that failures
-produce a clear, actionable message. Parsing satisfies both, and the parser's
-error already includes position information, which is more useful than anything I
-would write by hand. Full schema validation would additionally check that entity
-types and actions exist — but that requires a Cedar schema per tenant, which the
-requirements never mention and which there is no mechanism to supply. Validating
-against a schema that does not exist is not possible, so schema validation is out
-of scope rather than skipped.
+**Why:** Schema validation would check that the entity types and actions a policy
+references actually exist — but that needs a Cedar schema per tenant, which the
+requirements never mention and provide no way to supply. Validating against a
+schema that does not exist is not possible, so this is out of scope rather than
+skipped.
 
-**Cost:** A policy that parses but references entity types that do not exist is
-accepted. This is documented as CED-09 so the behaviour is recorded as intended
-rather than discovered as a defect.
+The second check exists because an empty, whitespace-only or comments-only file
+is *valid* Cedar: it parses to an empty policy set. Accepting one would store a
+policy file that grants and forbids nothing. Verified and logged as BUG-04.
+
+**Cost:** Two limitations, both known. A policy that parses but references
+non-existent entity types is accepted (CED-09). And the parser's errors name the
+offending token — `unexpected token \`;\`` — but carry no line or column, so
+error messages say what is wrong but not where. Reporting a position would mean
+locating the token in the source myself; recorded as a possible improvement.
 
 ### 11. Authentication
 
@@ -261,19 +280,18 @@ users, and not extendable to real ones without the change described above.
 EXISTS`; a re-runnable script that drops and recreates everything.
 
 **Chose:** `schema.sql` with explicit drops at the top, applied by
-`init_db.py`.
+`init_dev.py`.
 
 **Why:** Migrations exist to evolve a schema without losing data that cannot be
-regenerated. Every row in this database is either seeded or re-uploadable, so
-there is nothing to preserve and no migration history worth maintaining.
-`CREATE TABLE IF NOT EXISTS` was rejected outright because it silently does
-nothing when a table already exists — a schema change appears to apply and does
-not, which is worse than an error. Drop-and-recreate guarantees the database
-matches the file exactly, and gives tests a known clean starting state.
+regenerated. Every row here is seeded or re-uploadable, so there is nothing to
+preserve. `CREATE TABLE IF NOT EXISTS` was rejected outright: it silently does
+nothing when a table exists, so a schema change appears to apply and does not —
+worse than an error. Drop-and-recreate guarantees the database matches the file,
+and gives tests a known clean starting state.
 
-**Cost:** Running the script destroys all data, so it is kept in a script a
-person runs deliberately and never wired into application startup. Alembic would
-be the first thing added if this held data worth keeping.
+**Cost:** The script destroys all data, so it is run deliberately by a person and
+never wired into application startup. Alembic would be the first addition if this
+held data worth keeping.
 
 ### 13. Primary keys
 
@@ -283,14 +301,13 @@ be the first thing added if this held data worth keeping.
 
 **Why:** File ids appear in URLs, and sequential integers invite enumeration — a
 caller can walk `/policies/1`, `/policies/2` and learn how many files exist.
-UUIDs make that pointless. It is worth being precise about what this does and
-does not buy: unguessable ids are defence in depth, not the control. The actual
-control is that every query filters by the tenant from the validated auth scope,
-so a correctly guessed id still returns nothing.
 
-**Cost:** Less convenient to type while debugging. Mitigated by hardcoding
-readable UUIDs in the seed data so tests and README examples can reference fixed
-values.
+To be precise about what this buys: unguessable ids are defence in depth, **not**
+the control. The control is that every query filters by the tenant from the
+validated auth scope, so a correctly guessed id still returns nothing.
+
+**Cost:** Less convenient while debugging. Mitigated by hardcoding readable UUIDs
+in the seed data so tests and examples reference fixed values.
 
 ## Considered and deliberately excluded
 

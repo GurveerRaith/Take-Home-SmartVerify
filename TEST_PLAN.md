@@ -120,7 +120,7 @@ any way, an attacker can enumerate which file IDs exist.
 | ------ | --- | ------------------------------------------------------------------- | -------------------------------------------------------------------- | ------ |
 | CED-01 | P0  | Upload a syntactically valid Cedar policy                           | 201, file stored                                                     | —      |
 | CED-02 | P0  | Upload a file with a syntax error (missing semicolon)               | 400, rejected                                                        | —      |
-| CED-03 | P0  | The 400 body identifies _what_ is wrong and _where_ (line/position) | actionable message                                                   | —      |
+| CED-03 | P0  | The 400 body names the offending token (no line/column — see BUG-05) | actionable message                                                   | —      |
 | CED-04 | P0  | A rejected file leaves no Git commit and no DB row                  | both stores unchanged                                                | —      |
 | CED-05 | P1  | Upload an empty file                                                | 400 with a clear message, not a 500                                  | —      |
 | CED-06 | P1  | Upload a file of invalid UTF-8 bytes                                | 400, not a 500 or an unhandled decode error                          | —      |
@@ -272,7 +272,7 @@ DATABASE_URL=postgresql://policy:policy@localhost:5433/smartverify_test
 ```
 docker exec smartverify-db createdb -U policy smartverify_test
 
-python backend/scripts/init_db.py
+python backend/scripts/init_dev.py
 ```
 
 **Environment:**
@@ -291,102 +291,117 @@ python backend/scripts/init_db.py
 
 ## Bugs and fixes
 
-One entry per defect found. Record the ones found during development, not only
-the ones found at the end.
+One entry per defect, including those found during development rather than only
+at the end.
 
-### BUG-01 — `seed.sql` aborts: column/value count mismatch
+| ID | Summary | Status |
+| --- | --- | --- |
+| BUG-01 | `seed.sql` aborted: column/value count mismatch | Fixed |
+| BUG-02 | Alice's and Bob's tenant grants were inverted | Fixed |
+| BUG-03 | Init script reported failure over a fully seeded database | Fixed |
+| BUG-04 | Empty and comment-only files pass Cedar validation | Fixed |
+| BUG-05 | Design doc claimed Cedar errors include position info | Fixed |
 
-- **Found by:** applying `schema.sql` followed by `seed.sql` to a clean
-  PostgreSQL 16 database before any application code existed.
-- **Symptom:** `ERROR: INSERT has more target columns than expressions` on the
-  `tenants` insert. Because the file is wrapped in a transaction, the whole seed
-  rolled back, leaving a correctly built but completely empty database.
-- **Cause:** the column list named five columns
-  (`id, customer_id, name, folder_name, created_at`) while each `VALUES` tuple
-  supplied only four. `created_at` had no matching expression.
-- **Fix:** removed `created_at` from the column list. The column already has
-  `DEFAULT now()` in the schema, so naming it was redundant as well as wrong.
-- **Regression test:** INV-02 / INV-03, extended to apply `seed.sql` after
-  `schema.sql` rather than testing the schema alone.
+### BUG-01 — `seed.sql` aborted: column/value count mismatch
+
+**Found by:** applying `schema.sql` then `seed.sql` to a clean PostgreSQL 16
+database, before any application code existed.
+
+**Symptom:** `ERROR: INSERT has more target columns than expressions` on the
+`tenants` insert. The file is transaction-wrapped, so the whole seed rolled
+back, leaving a correctly built but empty database.
+
+**Cause:** the column list named five columns while each `VALUES` tuple supplied
+four — `created_at` had no matching expression.
+
+**Fix:** removed `created_at` from the column list; the schema already defaults
+it.
+
+**Regression test:** INV-02 / INV-03, extended to apply `seed.sql` as well as
+`schema.sql`.
 
 ### BUG-02 — Alice's and Bob's tenant grants were inverted
 
-- **Found by:** reviewing `seed.sql` against the fixture specification, then
-  confirming against the database with a "who can see what" query after seeding.
-- **Symptom:** the comment in `seed.sql` described Alice as having Globex
-  production _and_ staging, and Bob as having production only. The actual rows
-  gave Alice one grant and Bob two.
-- **Cause:** the grant rows were assigned to the wrong user UUIDs — the staging
-  grant went to Bob instead of Alice.
-- **Fix:** moved the `staging` grant from Bob to Alice so the data matches the
-  documented fixture.
-- **Regression test:** AUTH-05, AUTH-06, ISO-03 — each asserts an exact grant
-  count or an expected denial, so an inverted fixture fails them directly.
-- **Follow-up (done):** `seed.sql` now ends with a `DO` block that counts grants
-  where the user's `customer_id` differs from the tenant's and raises if any
-  exist, so a bad fixture aborts seeding rather than surfacing later as a
-  confusing test failure.
-- **Placement note:** the guard sits _above_ the `COMMIT`, deliberately. Verified
-  both ways — placed below the `COMMIT` it raises the same error, but the bad
-  grant is already committed and remains in the database. An assertion only
-  prevents damage if it shares a transaction with the write it is checking.
-  INV-01 stays in the suite regardless: the guard prevents, the test verifies.
+**Found by:** reviewing `seed.sql` against the fixture spec, then confirming with
+a "who can see what" query after seeding.
 
-### BUG-03 — `init_db.py` reported failure over a fully seeded database
+**Symptom:** comments described Alice as having production *and* staging and Bob
+production only. The rows gave Alice one grant and Bob two.
 
-- **Found by:** running `init_db.py` after refactoring it, while the script still
-  called a helper that had been moved into `seed.sql`.
-- **Symptom:** the script printed `Failed: name 'check_no_cross_customer_grants'
-is not defined` and exited 1, implying nothing had been applied. The database
-  was in fact fully populated — 3 users, 4 grants, 3 tenants, 2 customers.
-- **Cause:** two separate issues. The leftover call was a stale reference. The
-  misleading report was more interesting: `schema.sql` and `seed.sql` each carry
-  their own `BEGIN`/`COMMIT`, so both had already committed inside the connection
-  before Python raised. The `with psycopg.connect(...)` context manager had
-  nothing left to roll back.
-- **Fix:** removed the stale call. Corrected the mistaken assumption that the
-  connection context manager makes the two files atomic as a unit — it does not.
-- **Lesson recorded:** an exit code from the script describes the script, not the
-  database. Anything needing to prevent a bad write must run inside the
-  transaction that performs it, which is why the cross-customer guard lives in
-  `seed.sql` rather than in Python.
+**Why it mattered:** Bob exists solely to be a Globex user *without* a
+`globex/staging` grant — that is what makes ISO-03 testable. With the grants
+inverted, ISO-03 could never fail, and a defect authorising by customer instead
+of by tenant grant would have passed every isolation test.
+
+**Fix:** moved the `staging` grant from Bob to Alice.
+
+**Regression test:** AUTH-05, AUTH-06, ISO-03.
+
+**Follow-up (done):** `seed.sql` now ends with a `DO` block that raises if any
+grant crosses customers. It sits *above* the `COMMIT` deliberately — verified
+both ways, below the `COMMIT` it raises the same error but the bad grant is
+already committed. An assertion only prevents damage if it shares a transaction
+with the write it checks.
+
+### BUG-03 — Init script reported failure over a fully seeded database
+
+**Found by:** running the init script after refactoring, while it still called a
+helper that had moved into `seed.sql`.
+
+**Symptom:** printed `Failed: name 'check_no_cross_customer_grants' is not
+defined` and exited 1, implying nothing had been applied. The database was in
+fact fully populated.
+
+**Cause:** the stale call was trivial. The misleading report was not:
+`schema.sql` and `seed.sql` each carry their own `BEGIN`/`COMMIT`, so both had
+already committed before Python raised. The `with psycopg.connect(...)` context
+manager had nothing left to roll back.
+
+**Fix:** removed the stale call, and corrected the assumption that the
+connection context manager makes the two files atomic as a unit. It does not.
+
+**Lesson:** the script's exit code describes the script, not the database.
 
 ### BUG-04 — Empty and comment-only files pass Cedar validation
 
-- **Found by:** spiking `cedarpy` against sample files before writing the upload
-  path.
-- **Symptom:** an empty file, a whitespace-only file and a comments-only file all
-  parse successfully. `PolicySet.from_str("")` returns without error.
-- **Cause:** an empty policy set is syntactically valid Cedar. The parser is
-  behaving correctly; the assumption that "parses successfully" implies "is a
-  usable policy file" was wrong.
-- **Impact if unfixed:** CED-05 would have failed, and the service would have
-  accepted policy files granting and forbidding nothing.
-- **Fix:** `app/cedar.py` adds an explicit check after parsing. The parser exposes
-  no policy count, so the policy set is serialised with `policies_to_json_str`
-  and its `staticPolicies` counted; zero is rejected with a distinct message.
-- **Regression test:** CED-05, plus fixtures `invalid/empty.cedar` and
-  `invalid/comments-only.cedar`.
+**Found by:** spiking `cedarpy` against sample files before writing the upload
+path.
 
-### BUG-05 — Design document claimed Cedar errors include position information
+**Symptom:** empty, whitespace-only and comments-only files all parse
+successfully — `PolicySet.from_str("")` returns without error.
 
-- **Found by:** the same `cedarpy` spike.
-- **Symptom:** DESIGN.md decision 10 justified parse-level validation partly on
-  the grounds that "the parser's error already includes position information".
-  It does not. Errors are a single string with no line or column:
+**Cause:** an empty policy set is valid Cedar. The parser is correct; the
+assumption that "parses" implies "is usable" was not.
 
-  ```
-  missing semicolon  ->  unexpected end of input
-  typo in keyword    ->  invalid policy effect: permitt
-  unbalanced brace   ->  unexpected token `;`
-  ```
+**Impact if unfixed:** CED-05 would fail, and the service would accept policy
+files that grant and forbid nothing.
 
-- **Cause:** an assumption about the library recorded as fact before it was
-  verified.
-- **Impact:** documentation defect rather than a code defect. The decision still
-  holds — the messages name the offending token and are actionable — but the
-  stated reasoning was wrong, and CED-03 expected the response body to identify
-  _where_ the error is.
-- **Fix required:** reword DESIGN.md decision 10 and CED-03 to match observed
-  behaviour. Reporting a line number would mean locating the token in the source
-  ourselves; recorded as a possible improvement rather than a requirement.
+**Fix:** `app/cedar.py` counts policies after parsing. The parser exposes no
+count, so the set is serialised with `policies_to_json_str` and its
+`staticPolicies` counted; zero is rejected with a distinct message.
+
+**Regression test:** CED-05, plus fixtures `invalid/empty.cedar` and
+`invalid/comments-only.cedar`.
+
+### BUG-05 — Design doc claimed Cedar errors include position information
+
+**Found by:** the same `cedarpy` spike.
+
+**Symptom:** DESIGN.md decision 10 justified parse-level validation partly on the
+grounds that the parser's errors include position information. They do not:
+
+```
+missing semicolon  ->  unexpected end of input
+typo in keyword    ->  invalid policy effect: permitt
+unbalanced brace   ->  unexpected token `;`
+```
+
+**Cause:** an assumption about a library recorded as fact before it was verified.
+
+**Impact:** a documentation defect, not a code one. The decision still holds —
+the messages name the offending token — but the reasoning was wrong, and CED-03
+expected the body to identify *where*.
+
+**Fix:** reworded decision 10 and CED-03 to match observed behaviour. Reporting a
+line number would mean locating the token in the source ourselves; recorded as a
+possible improvement, not a requirement.
