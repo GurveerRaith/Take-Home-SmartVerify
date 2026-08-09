@@ -16,7 +16,7 @@ is scoped per tenant.
 | Dev init script      | Done        |
 | Cedar validation     | Done        |
 | Git storage layer    | Init only   |
-| Backend API          | Not started |
+| Backend API          | In progress |
 | Frontend             | Not started |
 
 ---
@@ -26,24 +26,69 @@ is scoped per tenant.
 **Prerequisites:** Docker Desktop and Python 3.11+ (developed against 3.14).
 `psql` is not needed — the container provides it.
 
+**Run every command from the repository root.**
+
+**1. Create and activate a virtual environment.**
+
+Homebrew's Python is externally managed (PEP 668) and refuses direct installs,
+so a virtualenv is required rather than optional.
+
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 ```
+
+**2. Install the backend dependencies.**
 
 ```bash
 pip install -r backend/requirements.txt
 ```
 
+**3. Start PostgreSQL.**
+
 ```bash
 docker compose up -d --wait
 ```
+
+**4. Create the schema, load the seed data, and initialise the policy repo.**
 
 ```bash
 python backend/scripts/init_dev.py
 ```
 
-`--wait` blocks until the database healthcheck passes, so the init script never
-races it. Expected output:
+**5. Point your editor at the virtualenv.**
+
+Only needed if you are opening the project in an editor, and it cannot be done
+from a config file — every editor requires the interpreter to be selected once
+per project.
+
+- **VS Code / Cursor:** `Cmd+Shift+P` → "Python: Select Interpreter" →
+  `./.venv/bin/python`, then reload the window.
+- **PyCharm:** Settings → Project → Python Interpreter → add the existing
+  interpreter at `.venv/bin/python`.
+
+Skip this and imports such as `fastapi` and `psycopg` will show as unresolved
+even though the code runs correctly.
+
+**6. Start the API.**
+
+```bash
+uvicorn backend.app.main:app --reload
+```
+
+```bash
+curl localhost:8000/api/health
+```
+
+Should return `{"status":"ok"}`. Interactive API docs are at
+<http://localhost:8000/docs>.
+
+Stop the server with `Ctrl+C` in its terminal. If it has been left running in
+the background, `pkill -f uvicorn` will stop it.
+
+---
+
+Step 3's `--wait` blocks until the database healthcheck passes, so step 4 never
+races it. Expected output from step 4:
 
 ```
 Resetting database at localhost:5433/smartverify
@@ -66,6 +111,18 @@ Done.
 data, and rebuilds the policy Git repository from scratch. Re-run it after
 editing `schema.sql` or `seed.sql` — that is the normal edit-test loop. Nothing
 runs it automatically, so starting the API will never wipe your data.
+
+The `/api/health` endpoint queries the database rather than just returning a
+constant, so a failure there means the API cannot reach Postgres — not merely
+that the process started.
+
+All commands are run from the repository root. The application is imported as
+`backend.app.main`, so no `PYTHONPATH` or `--app-dir` setting is needed —
+editors, `pytest` and `uvicorn` all resolve it the same way.
+
+**Rebuilding the virtualenv?** Stop the server first (`Ctrl+C`, or
+`pkill -f uvicorn`). Deleting `.venv` while `uvicorn` is running leaves the
+process alive but broken — see BUG-06 in [TEST_PLAN.md](TEST_PLAN.md).
 
 ### Optional: test database
 
@@ -191,6 +248,24 @@ fallback — `docker-compose.yml` uses `${VAR:-default}` and `init_dev.py` keeps
 
 **Note:** Docker Compose reads `.env` automatically; Python does not. `init_dev.py`
 loads it explicitly via `python-dotenv`.
+
+---
+
+## Troubleshooting
+
+**Imports show as unresolved in the editor.** Step 5 of the quick start was
+skipped, or the editor needs a reload. The editor is analysing with a different
+Python than `.venv`.
+
+No path configuration is needed beyond that — imports are rooted at `backend.`,
+so they resolve from the repository root without `PYTHONPATH`, `--app-dir` or
+editor `extraPaths` settings.
+
+**`ModuleNotFoundError: No module named 'backend'`.** The command was run from
+somewhere other than the repository root.
+
+**`connection refused` from `init_dev.py`.** PostgreSQL is not running. Run
+`docker compose up -d --wait` first.
 
 ---
 
