@@ -9,15 +9,16 @@ is scoped per tenant.
 
 ## Status
 
-| Component            | State       |
-| -------------------- | ----------- |
-| Database schema      | Done        |
-| Seed data            | Done        |
-| Dev init script      | Done        |
-| Cedar validation     | Done        |
-| Git storage layer    | Done        |
-| Backend API          | In progress |
-| Frontend             | Not started |
+| Component         | State       |
+| ----------------- | ----------- |
+| Database schema   | Done        |
+| Seed data         | Done        |
+| Dev init script   | Done        |
+| Cedar validation  | Done        |
+| Git storage layer | Done        |
+| Backend API       | Done        |
+| Tests             | Done        |
+| Frontend          | Not started |
 
 ---
 
@@ -200,7 +201,7 @@ The fixture is shaped so every isolation scenario is testable:
 - **Bob** belongs to Globex but has no grant on `globex/staging` — this is what
   separates "same customer, wrong tenant" from "different customer".
 - **Both customers have a tenant named `production`** — proves Git paths are
-  built from customer *and* tenant, not tenant alone.
+  built from customer _and_ tenant, not tenant alone.
 
 ---
 
