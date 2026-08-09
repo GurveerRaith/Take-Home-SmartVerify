@@ -24,6 +24,7 @@ uvicorn[standard]==0.52.1
 # files are uploaded.
 python-multipart==0.0.32
 
-# Test suite. httpx backs FastAPI's TestClient.
+# Test suite. httpx2 backs FastAPI's TestClient; the older httpx works but
+# emits a deprecation warning on every run.
 pytest==9.1.1
-httpx==0.28.1
+httpx2==2.9.1
