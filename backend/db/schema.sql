@@ -34,7 +34,6 @@ CREATE TABLE tenants (
 
     CONSTRAINT tenants_folder_name_format
         CHECK (folder_name ~ '^[a-z0-9][a-z0-9-]*$' AND char_length(folder_name) <= 64)
-
 );
 
 -- A user belongs to one customer.

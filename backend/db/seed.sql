@@ -6,9 +6,9 @@
 
 BEGIN;
 
-INSERT INTO customers (id, name, folder_name, created_at) VALUES
-    ('11111111-1111-1111-1111-111111111111', 'Globex', 'globex', NOW()),
-    ('22222222-2222-2222-2222-222222222222', 'Initech',    'initech', NOW());
+INSERT INTO customers (id, name, folder_name) VALUES
+    ('11111111-1111-1111-1111-111111111111', 'Globex',  'globex'),
+    ('22222222-2222-2222-2222-222222222222', 'Initech', 'initech');
 
 INSERT INTO tenants (id, customer_id, name, folder_name) VALUES
     ('aaaaaaaa-0000-0000-0000-000000000001',

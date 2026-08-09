@@ -5,7 +5,7 @@ recreates the Git repository that holds policy file content.
 Destructive by design: all data in the target database is lost, and the
 policy repository is deleted and rebuilt.
 
-Usage:  python backend/scripts/init_db.py
+Usage:  python backend/scripts/init_dev.py
 """
 
 import os
@@ -18,7 +18,7 @@ from pathlib import Path
 import psycopg
 from dotenv import load_dotenv
 
-# __file__ is backend/scripts/init_db.py, so two levels up is backend/.
+# __file__ is backend/scripts/init_dev.py, so two levels up is backend/.
 # Resolved from the script's own location so the script works no matter
 # which directory it is run from.
 BACKEND_DIR = Path(__file__).resolve().parent.parent
