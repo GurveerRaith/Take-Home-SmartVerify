@@ -42,7 +42,13 @@ Each entry states what was considered, what was chosen, why, and what it costs.
 | 10                      | Cedar validation      | Parse-level + non-empty check        | Schema validation                |
 | 11                      | Authentication        | Seeded plaintext bearer tokens       | JWT + login; hashed tokens       |
 | 12                      | Schema management     | Re-runnable init script              | Alembic migrations               |
-| 13                      | Primary keys          | UUID                                 | `BIGSERIAL`                      |
+| 13  | Primary keys          | UUID                                  | `BIGSERIAL`                     |
+| 14  | Database connections  | One per request                       | Connection pool                 |
+| 15  | API response shape    | A projection, enforced by a model     | Returning the row               |
+| 16  | Git concurrency       | One process-wide write lock           | No lock; advisory lock          |
+| 17  | Configuration         | Environment variables with fallbacks  | Hardcoded paths and DSNs        |
+| 18  | Browser access        | CORS restricted to named origins      | `allow_origins=["*"]`           |
+| 19  | Test strategy         | 15 parametrized tests, per-test reset | One test per scenario           |
 
 ### 1. Write ordering: Git before Postgres
 
@@ -308,6 +314,129 @@ validated auth scope, so a correctly guessed id still returns nothing.
 
 **Cost:** Less convenient while debugging. Mitigated by hardcoding readable UUIDs
 in the seed data so tests and examples reference fixed values.
+
+### 14. Database connections
+
+**Considered:** A connection pool (`psycopg_pool`); a new connection per
+request.
+
+**Chose:** One connection opened per request by a FastAPI dependency, closed
+when the request finishes.
+
+**Why:** A pool is the right answer for a service under real load, and is only a
+few lines more. It was rejected here because it adds a lifecycle to explain and
+manage for a project whose traffic is a demonstration. The per-request approach
+also gives transaction handling for free: the `with psycopg.connect(...)` block
+commits when a request succeeds and rolls back when it raises, so no route
+manages transactions itself.
+
+FastAPI caches dependency results within a request, so a route depending on both
+`get_tenant_scope` and `get_connection` receives the *same* connection, not two.
+
+**Cost:** A connection is established per request, which would matter under
+load. Moving to a pool is a change to one function.
+
+### 15. Shape of API responses
+
+**Considered:** Returning database rows directly; defining an explicit response
+model.
+
+**Chose:** A Pydantic `PolicyFileOut` model listing exactly the five fields the
+interface needs, set as `response_model` on each route.
+
+**Why:** The row carries `git_path` and `commit_sha`, which are internal storage
+details. Publishing them would leak the repository layout — telling a caller
+that files live at `{customer}/{tenant}/{file}` is free information for anyone
+probing for traversal — and would tie the API contract to the schema, so a
+column rename would break clients.
+
+The mechanism matters as much as the intent: FastAPI *strips* any field absent
+from the model, so a query that starts selecting `git_path` cannot leak it by
+accident. The rule is enforced rather than remembered.
+
+`uploaded_by` is resolved to an email address rather than returned as a UUID,
+because that is what the interface displays.
+
+**Cost:** One model to keep in step with the interface's needs.
+
+### 16. Serialising Git writes
+
+**Considered:** No locking; a process-wide lock; a PostgreSQL advisory lock.
+
+**Chose:** A single `threading.Lock` around every Git write.
+
+**Why:** Git's index is one file with no concurrency protection, and FastAPI
+runs synchronous endpoints in a thread pool — so two uploads genuinely can
+interleave and corrupt it. A process-wide lock is three lines and removes the
+problem entirely for a single-process deployment.
+
+**Cost:** It only holds within one process. Running multiple API workers would
+need a PostgreSQL advisory lock, or a single writer that owns the repository.
+This is the first thing I would change before scaling out.
+
+### 17. Configuration and testability
+
+**Considered:** Hardcoding the database DSN and repository path; reading both
+from the environment.
+
+**Chose:** `DATABASE_URL` and `POLICY_REPO_PATH`, each with a working fallback,
+and `.env` loaded explicitly via `python-dotenv`.
+
+**Why:** These two variables are what make the test suite safe. Tests point
+`DATABASE_URL` at `smartverify_test` and `POLICY_REPO_PATH` at a temporary
+repository, so running the suite cannot touch development data or the real
+policy repository.
+
+`repo_path()` reads the environment on every call rather than at import time.
+Captured at import, a test's `monkeypatch.setenv` would arrive too late and
+every test would write to the real repository.
+
+Fallbacks mean the project still runs with no `.env` present at all, which is
+why the same commands work from a clone or from the distributed archive.
+
+**Cost:** The default DSN is duplicated between `docker-compose.yml` and the
+application. They are asserted to match by the fact that the stack starts.
+
+### 18. Browser access
+
+**Considered:** `allow_origins=["*"]`; naming the permitted origins.
+
+**Chose:** An explicit list containing only the Vite development server.
+
+**Why:** The API is called with an `Authorization` header. Allowing any origin
+would let an arbitrary page script the API using a token it had obtained. Naming
+the origins costs nothing and keeps the browser enforcing the boundary.
+
+`Content-Disposition` is added to `expose_headers`, without which the browser
+hides it from JavaScript and the frontend cannot read a download's filename —
+a failure that appears only in the browser and not in `curl`.
+
+**Cost:** A deployed frontend would need its origin added.
+
+### 19. Test strategy
+
+**Considered:** One test per scenario (about 75); a smaller set of parametrized
+tests; testing only the happy paths.
+
+**Chose:** 15 tests, parametrized into 57 cases, weighted towards isolation.
+
+**Why:** Enumerating every scenario separately produces a suite that is
+expensive to write and read while testing nothing extra. Parametrization keeps
+the coverage and names each case in the output, so a failure still identifies
+the exact input.
+
+Isolation gets five of the fifteen because it is the hardest requirement. Two of
+those exist to catch specific defects nothing else would: T-04 fails if
+authorisation is done by customer rather than by tenant grant, and T-06 fails if
+a file is looked up by id without its tenant.
+
+The database is rebuilt before *every* test rather than once per session. It is
+slower, but it is what makes the suite order-independent — without it a test
+that deletes rows changes the result of whatever runs next.
+
+**Cost:** About 50 ms per test for the reset, and four scenario groups left
+unautomated (fault injection, concurrency, frontend components, framework-level
+validation), each recorded with its reasoning in TEST_PLAN.md.
 
 ## Considered and deliberately excluded
 
