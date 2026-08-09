@@ -42,8 +42,8 @@ Priority: **P0** must pass to submit · **P1** important
 
 | ID   | Pri | Test                                                                     | Asserts                                          | Result | Last run |
 | ---- | --- | ------------------------------------------------------------------------ | ------------------------------------------------ | ------ | -------- |
-| T-01 | P0  | Bad credentials rejected<br>*param:* no header, malformed header, unknown token | 401, and an identical body in all three cases | —      | —        |
-| T-02 | P0  | `/api/me` returns exactly the granted tenants<br>*param:* alice=2, bob=1, carol=1 | correct identity and tenant list per token  | —      | —        |
+| T-01 | P0  | Bad credentials rejected<br>*param:* no header, malformed header, unknown token | 401, and an identical body in all three cases | PASS   | 2026-08-09 |
+| T-02 | P0  | `/api/me` returns exactly the granted tenants<br>*param:* alice=2, bob=1, carol=1 | correct identity and tenant list per token  | PASS   | 2026-08-09 |
 
 T-01 uses one message for every failure mode on purpose. Distinguishing "no
 token" from "unknown token" would tell a caller whether a token exists.
@@ -52,11 +52,11 @@ token" from "unknown token" would tell a caller whether a token exists.
 
 | ID   | Pri | Test                                                                | Asserts                                       | Result | Last run |
 | ---- | --- | ------------------------------------------------------------------- | --------------------------------------------- | ------ | -------- |
-| T-03 | P0  | Carol lists `globex/production` — different customer                | 404                                           | —      | —        |
-| T-04 | P0  | **Bob lists `globex/staging`** — own customer, no grant             | 404                                           | —      | —        |
-| T-05 | P0  | Carol targets a real Globex file by exact UUID<br>*param:* GET, download, DELETE | 404 each; file still present afterwards | —      | —        |
-| T-06 | P0  | Valid file ID requested under the wrong tenant path                 | 404                                           | —      | —        |
-| T-07 | P0  | Upload to a tenant the caller was not granted                       | 404; no Git commit; no metadata row           | —      | —        |
+| T-03 | P0  | Carol lists `globex/production` — different customer                | 404                                           | PASS   | 2026-08-09 |
+| T-04 | P0  | **Bob lists `globex/staging`** — own customer, no grant             | 404                                           | PASS   | 2026-08-09 |
+| T-05 | P0  | Carol targets a real Globex file by exact UUID<br>*param:* GET, download, DELETE | 404 each; file still present afterwards | PASS   | 2026-08-09 |
+| T-06 | P0  | Valid file ID requested under the wrong tenant path                 | 404                                           | PASS   | 2026-08-09 |
+| T-07 | P0  | Upload to a tenant the caller was not granted                       | 404; no Git commit; no metadata row           | PASS   | 2026-08-09 |
 
 Why these two matter most:
 
@@ -74,8 +74,8 @@ enumerate which IDs are real.
 
 | ID   | Pri | Test                                                          | Asserts                                             | Result | Last run |
 | ---- | --- | ------------------------------------------------------------- | --------------------------------------------------- | ------ | -------- |
-| T-08 | P0  | Valid policies accepted<br>*param:* all 4 `fixtures/valid/`    | 201, file retrievable                               | —      | —        |
-| T-09 | P0  | Invalid policies rejected<br>*param:* all 7 `fixtures/invalid/` | 400 (never 500), message names the actual problem | —      | —        |
+| T-08 | P0  | Valid policies accepted<br>*param:* all 4 `fixtures/valid/`    | 201, file retrievable                               | PASS   | 2026-08-09 |
+| T-09 | P0  | Invalid policies rejected<br>*param:* all 7 `fixtures/invalid/` | 400 (never 500), message names the actual problem | PASS   | 2026-08-09 |
 
 The invalid fixtures cover syntax errors, non-Cedar prose, non-UTF-8 bytes, and
 the two cases that *parse successfully* but define nothing (empty and
@@ -85,8 +85,8 @@ comments-only — see BUG-04).
 
 | ID   | Pri | Test                                                                 | Asserts                                   | Result | Last run |
 | ---- | --- | -------------------------------------------------------------------- | ----------------------------------------- | ------ | -------- |
-| T-10 | P0  | Bad filenames rejected<br>*param:* `../`, `/`, `.txt`, leading dot, >255 chars | 400; nothing written outside the tenant directory | — | — |
-| T-11 | P0  | Duplicate live filename → 409; the same name after deletion → 201    | uniqueness scoped to live rows only       | —      | —        |
+| T-10 | P0  | Bad filenames rejected<br>*param:* `../`, `/`, `.txt`, leading dot, >255 chars | 400; nothing written outside the tenant directory | PASS | 2026-08-09 |
+| T-11 | P0  | Duplicate live filename → 409; the same name after deletion → 201    | uniqueness scoped to live rows only       | PASS   | 2026-08-09 |
 
 T-11 is what the partial unique index exists for: uniqueness that applies to
 live files without permanently reserving a deleted name.
@@ -95,10 +95,10 @@ live files without permanently reserving a deleted name.
 
 | ID   | Pri | Test                                                                          | Asserts                                             | Result | Last run |
 | ---- | --- | ----------------------------------------------------------------------------- | --------------------------------------------------- | ------ | -------- |
-| T-12 | P0  | Full lifecycle: upload → appears in list → download → delete → gone from list  | download is byte-identical to upload                | —      | —        |
-| T-13 | P0  | The same filename in two tenants stays independent                            | each tenant gets its own content                    | —      | —        |
-| T-14 | P1  | Git content at the stored `commit_sha` matches the upload; a rejected upload leaves no commit and no row | both stores agree            | —      | —        |
-| T-15 | P0  | No cross-customer grants exist in `user_tenants`                              | zero rows                                           | —      | —        |
+| T-12 | P0  | Full lifecycle: upload → appears in list → download → delete → gone from list  | download is byte-identical to upload                | PASS   | 2026-08-09 |
+| T-13 | P0  | The same filename in two tenants stays independent                            | each tenant gets its own content                    | PASS   | 2026-08-09 |
+| T-14 | P1  | Git content at the stored `commit_sha` matches the upload; a rejected upload leaves no commit and no row | both stores agree            | PASS   | 2026-08-09 |
+| T-15 | P0  | No cross-customer grants exist in `user_tenants`                              | zero rows                                           | PASS   | 2026-08-09 |
 
 T-14 is the only test that inspects **both** stores. Everything else could pass
 with a broken Git layer.
@@ -163,20 +163,43 @@ Verified during the demo recording rather than automated.
 
 ## Execution report
 
-Paste real terminal output rather than a summary. Capture it with:
+Captured with:
 
 ```bash
 pytest -v | tee test-output.txt
 ```
 
-**Environment:** PostgreSQL 16 (Docker), Python 3.14, pytest 9.1.1
+**Environment:** macOS · Python 3.14.3 · pytest 9.1.1 · PostgreSQL 16 (Docker)
+**Suite:** 15 planned tests, expanded to **57 cases** by parametrization.
 
-| Run | Date | Passed | Failed | Notes |
-| --- | ---- | ------ | ------ | ----- |
-|     |      |        |        |       |
+| Run | Date       | Passed | Failed | Notes                                  |
+| --- | ---------- | ------ | ------ | -------------------------------------- |
+| 1   | 2026-08-09 | 57     | 0      | First full run after the API completed |
+
+Cases per test file:
+
+| File                       | Cases | Covers      |
+| -------------------------- | ----- | ----------- |
+| `test_auth.py`             | 13    | T-01, T-02  |
+| `test_isolation.py`        | 11    | T-03 – T-07 |
+| `test_cedar_validation.py` | 12    | T-08, T-09  |
+| `test_upload_rules.py`     | 13    | T-10, T-11  |
+| `test_behaviour.py`        | 8     | T-12 – T-15 |
+
+Full output is in [test-output.txt](test-output.txt). Tail:
 
 ```
-<pytest output>
+backend/tests/test_isolation.py::test_t03_cross_customer_list_is_denied PASSED
+backend/tests/test_isolation.py::test_t04_same_customer_ungranted_tenant_is_denied PASSED
+backend/tests/test_isolation.py::test_t05_cross_tenant_access_by_exact_id_is_denied[metadata] PASSED
+backend/tests/test_isolation.py::test_t05_cross_tenant_access_by_exact_id_is_denied[download] PASSED
+backend/tests/test_isolation.py::test_t05_cross_tenant_access_by_exact_id_is_denied[delete] PASSED
+backend/tests/test_isolation.py::test_t05_denied_and_nonexistent_are_identical PASSED
+backend/tests/test_isolation.py::test_t06_valid_file_id_under_the_wrong_tenant_path PASSED
+backend/tests/test_isolation.py::test_t07_cross_customer_upload_writes_nothing PASSED
+backend/tests/test_isolation.py::test_t07_same_customer_ungranted_upload_writes_nothing PASSED
+
+============================== 57 passed in 6.82s ==============================
 ```
 
 ---
