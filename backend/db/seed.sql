@@ -1,14 +1,14 @@
--- Test data. There is no signup flow, so users are created here.
-
--- The IDs and tokens are written out by hand instead of being generated, so
--- that the README, the tests and any curl commands can all use the same
--- values.
+-- Seed data. There is no signup flow, so users are created here.
+-- The IDs and tokens are written out by hand instead of being generated.
+-- This is so that the README, the tests and any curl commands can all use the same values.
 
 BEGIN;
+
 
 INSERT INTO customers (id, name, folder_name) VALUES
     ('11111111-1111-1111-1111-111111111111', 'Globex',  'globex'),
     ('22222222-2222-2222-2222-222222222222', 'Initech', 'initech');
+
 
 INSERT INTO tenants (id, customer_id, name, folder_name) VALUES
     ('aaaaaaaa-0000-0000-0000-000000000001',
@@ -31,6 +31,7 @@ INSERT INTO users (id, customer_id, email, api_token) VALUES
     ('cccccccc-0000-0000-0000-000000000003',
      '22222222-2222-2222-2222-222222222222',
      'carol@initech.example', 'carol_token');
+
 
 -- Alice: Globex production and staging.
 -- Bob: Globex production only.

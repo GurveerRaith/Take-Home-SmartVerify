@@ -1,12 +1,14 @@
-BEGIN;
-
 -- Dev-time init script: dropped in reverse dependency order so
 -- this file can be re-run after every edit.
+
+BEGIN;
+
 DROP TABLE IF EXISTS policy_files CASCADE;
 DROP TABLE IF EXISTS user_tenants CASCADE;
 DROP TABLE IF EXISTS users        CASCADE;
 DROP TABLE IF EXISTS tenants      CASCADE;
 DROP TABLE IF EXISTS customers    CASCADE;
+
 
 -- A customer is an organisation, e.g. "Globex Inc".
 CREATE TABLE customers (
@@ -15,8 +17,7 @@ CREATE TABLE customers (
     folder_name TEXT NOT NULL UNIQUE, -- folder name in the Git repo
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-    -- character constraints mean a path-unsafe value cannot exist in the
-    -- database at all, no matter what the application does.
+    -- Character constraints to disallow path unsafe values.
     CONSTRAINT customers_folder_name_format
         CHECK (folder_name ~ '^[a-z0-9][a-z0-9-]*$' AND char_length(folder_name) <= 64)
 );
@@ -36,6 +37,7 @@ CREATE TABLE tenants (
         CHECK (folder_name ~ '^[a-z0-9][a-z0-9-]*$' AND char_length(folder_name) <= 64)
 );
 
+
 -- A user belongs to one customer.
 CREATE TABLE users (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -44,6 +46,7 @@ CREATE TABLE users (
     api_token   TEXT NOT NULL UNIQUE  -- how the user logs in
 );
 
+
 -- Which tenants a user is allowed to see. One user can have several.
 CREATE TABLE user_tenants (
     user_id   UUID NOT NULL REFERENCES users (id) ON DELETE CASCADE,
@@ -51,6 +54,7 @@ CREATE TABLE user_tenants (
 
     PRIMARY KEY (user_id, tenant_id) -- a user can only have one entry per tenant
 );
+
 
 -- One row per uploaded Cedar file.
 CREATE TABLE policy_files (
@@ -64,8 +68,7 @@ CREATE TABLE policy_files (
     uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at  TIMESTAMPTZ, -- NULL means the file is still there
 
-    -- Second line of defence behind the application's filename validation.
-    -- Excluding '/' is what makes path traversal unrepresentable.
+
     CONSTRAINT policy_files_filename_format
         CHECK (filename ~ '^[A-Za-z0-9][A-Za-z0-9._-]*\.cedar$'
                AND char_length(filename) <= 255),

@@ -1,5 +1,7 @@
 """T-03 to T-07 -- tenant isolation.
 
+These tests ensure that users can only access the policy files they are granted access to,
+and that they cannot enumerate or access files in other tenants.
 See TEST_PLAN.md.
 """
 
