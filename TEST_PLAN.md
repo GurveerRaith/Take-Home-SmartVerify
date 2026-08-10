@@ -147,17 +147,107 @@ Identified, considered, and deliberately left out — with reasons.
 
 ## Manual UI checklist
 
-Verified during the demo recording rather than automated.
+Verified by hand rather than automated, and used as the script for the demo
+recording. The steps below run all seven checks in a single pass.
 
-| #   | Check                                                        | Result |
-| --- | ------------------------------------------------------------ | ------ |
-| M-1 | Sign in with a seeded token reaches the file list            | —      |
-| M-2 | Tenant switcher shows only granted tenants (Bob sees one)    | —      |
-| M-3 | Switching tenant reloads the correct file list               | —      |
-| M-4 | Uploading an invalid Cedar file shows the validation message | —      |
-| M-5 | Uploading a valid file updates the list without a refresh    | —      |
-| M-6 | Download returns the right filename and content              | —      |
-| M-7 | Delete removes the file from the list                        | —      |
+| #   | Check                                                        | Result | Date |
+| --- | ------------------------------------------------------------ | ------ | ---- |
+| M-1 | Sign in with a seeded token reaches the file list            | —      | —    |
+| M-2 | Tenant switcher shows only granted tenants (Bob sees one)    | —      | —    |
+| M-3 | Switching tenant reloads the correct file list               | —      | —    |
+| M-4 | Uploading an invalid Cedar file shows the validation message | —      | —    |
+| M-5 | Uploading a valid file updates the list without a refresh    | —      | —    |
+| M-6 | Download returns the right filename and content              | —      | —    |
+| M-7 | Delete removes the file from the list                        | —      | —    |
+
+### Setup
+
+Start from a freshly seeded environment so the recording is reproducible:
+
+```bash
+docker compose up -d --wait && python backend/scripts/init_dev.py
+```
+
+Then, in two more terminals:
+
+```bash
+uvicorn backend.app.main:app --reload
+```
+
+```bash
+cd frontend && npm run dev
+```
+
+Open <http://localhost:5173> in a **real browser window**, not an embedded
+preview — M-6 requires a genuine download to disk.
+
+### Walkthrough
+
+**1. Sign in as `bob_token`** — covers **M-1**, and half of **M-2**.
+
+Expect `bob@globex.example · Globex`, with the tenant dropdown containing only
+**Production**. Open the dropdown so the single entry is visible: Bob's customer
+owns two tenants and he holds a grant on one. This is the isolation model made
+visible, and it is the same scenario as T-04.
+
+**2. Sign out, sign in as `alice_token`** — completes **M-2**.
+
+Expect two tenants: Production and Staging.
+
+**3. Switch between Production and Staging** — **M-3**.
+
+Expect Production to list `admin-access.cedar` and `read-only.cedar`, and
+Staging to list `admin-access.cedar` only. The same filename in two tenants is
+deliberate seeded content.
+
+**4. Upload an invalid policy** — **M-4**.
+
+Choose `backend/tests/fixtures/invalid/missing-semicolon.cedar`.
+
+Expect `Invalid Cedar syntax: unexpected end of input`, and the list unchanged.
+Repeat with `invalid/empty.cedar`, which gives a different message
+(`File contains no Cedar policy statements...`) — showing the errors come from
+the parser rather than a single canned string. See BUG-04.
+
+**5. Upload a valid policy** — **M-5**.
+
+Choose `backend/tests/fixtures/valid/simple-permit.cedar`.
+
+Expect a success message and the file at the top of the list with no manual
+refresh. Uploading `read-only.cedar` into Production instead would return 409,
+which is correct but makes a worse demonstration.
+
+**6. Download `admin-access.cedar`** — **M-6**.
+
+Expect it to save under that exact name. Confirm the content matches:
+
+```bash
+diff ~/Downloads/admin-access.cedar data/policy-repo/globex/production/admin-access.cedar
+```
+
+No output means byte-identical.
+
+**7. Delete a file** — **M-7**.
+
+Expect a confirmation prompt, then the row disappears from the list.
+
+### Isolation, demonstrated directly
+
+The requirement is that isolation holds "even with a hand-crafted API request
+that bypasses the UI", so it is worth showing outside the interface:
+
+```bash
+curl -i -H "Authorization: Bearer carol_token" \
+  "http://localhost:8000/api/tenants/aaaaaaaa-0000-0000-0000-000000000001/policies"
+```
+
+Expect **404**. Carol is authenticated and the tenant is real; she still gets
+nothing, and the response is indistinguishable from a tenant that does not
+exist.
+
+Then sign in as `carol_token` in the interface and download **her**
+`admin-access.cedar`. Same filename as Alice's, entirely different content —
+one name, two tenants, no leakage.
 
 ---
 
@@ -217,6 +307,9 @@ at the end.
 | BUG-04 | Empty and comment-only files pass Cedar validation | Fixed |
 | BUG-05 | Design doc claimed Cedar errors include position info | Fixed |
 | BUG-06 | API unreachable after rebuilding the virtualenv | Fixed (environment) |
+| BUG-07 | Init script ignored `POLICY_REPO_PATH` | Fixed |
+| BUG-08 | Downloads failed intermittently — object URL revoked too early | Fixed |
+| BUG-09 | Sample policy filenames did not match their stored names | Fixed |
 
 ### BUG-01 — `seed.sql` aborted: column/value count mismatch
 
@@ -356,3 +449,118 @@ look alike — nothing listening, something listening but broken, and something
 listening on a different port. `lsof -nP -iTCP:8000` distinguishes them
 immediately, and a *timeout* rather than *connection refused* is the signal that
 a process is holding the socket without serving.
+
+### BUG-07 — Init script honoured `DATABASE_URL` but ignored `POLICY_REPO_PATH`
+
+**Found by:** asking how to point the application at the test database and test
+policy repository, and reading which module consumed which variable.
+
+**Symptom:** `init_dev.py` read `DATABASE_URL`, so it could be aimed at any
+database, but its policy repository path was a hardcoded constant. Running
+
+```bash
+DATABASE_URL=...smartverify_test POLICY_REPO_PATH=/tmp/scratch/policy-repo \
+    python backend/scripts/init_dev.py
+```
+
+would seed the test database as asked while **deleting and recreating the
+development policy repository**, which the caller had explicitly redirected away
+from.
+
+**Cause:** the configuration convention was only half implemented.
+`backend/app/git_repo.py` reads `POLICY_REPO_PATH` on every call so tests can
+redirect writes; `init_dev.py` was written earlier and never updated to match,
+so the application and the script could disagree about which repository was in
+play.
+
+**Impact:** no test caught this, because the test suite never invokes
+`init_dev.py` — `conftest.py` applies the SQL files itself. The failure mode was
+data loss in the one situation the variable exists to prevent.
+
+**Fix:** `init_dev.py` now has a `repo_path()` helper reading `POLICY_REPO_PATH`
+with the same default, mirroring `git_repo.py`. The existing guard, which
+refuses any path not ending in `policy-repo`, still applies and now also limits
+where the environment variable can point.
+
+**Verified:** with both variables set, the test database is seeded and a scratch
+repository is created, while the development database (3 live files) and
+repository (6 commits) are untouched.
+
+**Lesson:** a configuration convention honoured in some places and not others is
+worse than none at all, because it looks like it works. When a variable exists
+to redirect writes, every writer has to read it.
+
+### BUG-08 — Downloads failed intermittently: object URL revoked too early
+
+**Found by:** manual testing of the download button in the browser. The
+reported symptom was that the downloaded file did not seem to use the filename
+shown in the interface.
+
+**Symptom:** intermittent. A download would sometimes not produce the expected
+file. Because it did not fail every time, it initially looked like a naming
+problem.
+
+**Investigation:** the naming path was traced end to end and found correct —
+
+| Step | Value |
+| --- | --- |
+| List row | `read-only.cedar` |
+| `Content-Disposition` (readable cross-origin) | `attachment; filename="read-only.cedar"` |
+| Parsed by `filenameFromResponse` | `read-only.cedar` |
+| `link.download` set to | `read-only.cedar` |
+
+Instrumenting the click showed the real problem: `URL.revokeObjectURL` ran
+**45 ms after** `link.click()`, in the same task.
+
+**Cause:** `saveBlob` released the object URL synchronously after clicking the
+synthetic link. That races the browser reading the blob; if the release wins,
+the download fails or saves under the wrong name. The intermittency is inherent
+to a race.
+
+**Fix:** the revoke is deferred to a later task rather than firing in the same
+tick. Memory is still released; the download gets a chance to start first.
+`filenameFromResponse` was also hardened to accept an unquoted `filename=`.
+
+**Verified:** every row's Download button now sets the matching filename, with
+nothing revoked during the download window. The same filename in two tenants
+still downloads different content.
+
+**Lesson:** the reported symptom and the actual cause were in different places.
+Tracing the naming path first — and proving it correct — is what made the
+timing problem visible.
+
+### BUG-09 — Sample policy filenames did not match their stored names
+
+**Found by:** noticing that `backend/db/sample-policies/globex-readonly.cedar`
+appears in the interface as `read-only.cedar`.
+
+**Symptom:** the filename on disk and the filename stored by `init_dev.py`
+were different, with nothing in the folder to indicate the mapping. Reading the
+samples directory gave a misleading impression of what the seeded environment
+would contain.
+
+**Cause:** all sample files sat in one flat directory and therefore needed
+unique names, so a five-column table in `init_dev.py` mapped each source file
+to a different stored name:
+
+```python
+("globex", "production", "read-only.cedar", "globex-readonly.cedar", "alice@globex.example")
+```
+
+The same fact — which file belongs where, under what name — was recorded in two
+places: the directory contents and that table. Nothing kept them in agreement.
+
+**Fix:** `sample-policies/` now mirrors the policy repository layout, so a file
+at `globex/production/admin-access.cedar` is stored under exactly that path with
+exactly that name. The mapping table is gone; seeding walks the directory and
+derives customer, tenant and filename from the path. Only a two-entry
+customer-to-uploader map remains.
+
+**Consequence:** adding a sample file is now dropping it in the right folder,
+with no code change and no second place to update.
+
+**Lesson:** the third instance of the same root cause in this project, after
+BUG-02 (fixture comments disagreeing with fixture rows) and BUG-07 (a
+configuration variable honoured in one place and not another). One fact
+recorded twice will eventually disagree; deriving it from a single source
+removes the possibility rather than reducing the likelihood.
