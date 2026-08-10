@@ -24,8 +24,18 @@ from dotenv import load_dotenv
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 SCHEMA_FILE = BACKEND_DIR / "db" / "schema.sql"
 SEED_FILE = BACKEND_DIR / "db" / "seed.sql"
+SAMPLES_DIR = BACKEND_DIR / "db" / "sample-policies"
 ENV_FILE = BACKEND_DIR.parent / ".env"
-POLICY_REPO = BACKEND_DIR.parent / "data" / "policy-repo"
+DEFAULT_POLICY_REPO = BACKEND_DIR.parent / "data" / "policy-repo"
+
+# Running a script puts its own directory on sys.path, not the repository
+# root, so `backend.app` is not importable without this. Reusing the
+# application's Git and validation code keeps sample files on exactly the same
+# path a real upload takes, rather than reimplementing it here.
+sys.path.insert(0, str(BACKEND_DIR.parent))
+
+from backend.app import git_repo  # noqa: E402
+from backend.app.cedar import validate_policy_bytes  # noqa: E402
 
 # Docker Compose reads .env automatically; Python does not. Loading it here
 # means both sides take their configuration from the same file. The path is
@@ -37,6 +47,29 @@ load_dotenv(ENV_FILE)
 # Fallback if .env is missing entirely. Matches the defaults in
 # docker-compose.yml.
 DEFAULT_DSN = "postgresql://policy:policy@localhost:5433/smartverify"
+
+# Sample content so a freshly initialised environment is not empty.
+#
+# backend/db/sample-policies/ mirrors the layout of the policy repository:
+# a file at globex/production/admin-access.cedar is stored under exactly that
+# path, with exactly that name. Nothing is renamed on the way in.
+#
+# admin-access.cedar deliberately appears in three tenants with different
+# content, demonstrating that files are scoped per tenant and that two
+# customers can hold the same filename without collision.
+UPLOADER_BY_CUSTOMER = {
+    "globex": "alice@globex.example",
+    "initech": "carol@initech.example",
+}
+
+
+def repo_path() -> Path:
+    """Location of the policy repository to reset.
+
+    Reads POLICY_REPO_PATH, the same variable backend/app/git_repo.py uses, so
+    the script and the application always agree on which repository is in play.
+    """
+    return Path(os.environ.get("POLICY_REPO_PATH", DEFAULT_POLICY_REPO))
 
 
 def wait_for_database(dsn: str, attempts: int = 30) -> None:
@@ -100,7 +133,7 @@ def run_git(*args: str) -> None:
     out as an exit status with no reason attached.
     """
     result = subprocess.run(
-        ["git", *args], cwd=POLICY_REPO, capture_output=True, text=True
+        ["git", *args], cwd=repo_path(), capture_output=True, text=True
     )
     if result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip()}")
@@ -108,13 +141,16 @@ def run_git(*args: str) -> None:
 
 def reset_policy_repo() -> None:
     """Delete and recreate the Git repository that holds policy file content."""
-    # Guard against a wrong path constant turning this into a recursive
-    # delete of something else.
-    if POLICY_REPO.name != "policy-repo":
-        raise RuntimeError(f"refusing to delete unexpected path: {POLICY_REPO}")
+    repo = repo_path()
 
-    shutil.rmtree(POLICY_REPO, ignore_errors=True)
-    POLICY_REPO.mkdir(parents=True)
+    # Guard against a wrong path turning this into a recursive delete of
+    # something else. Also stops POLICY_REPO_PATH being pointed at, say, a
+    # home directory by accident.
+    if repo.name != "policy-repo":
+        raise RuntimeError(f"refusing to delete unexpected path: {repo}")
+
+    shutil.rmtree(repo, ignore_errors=True)
+    repo.mkdir(parents=True)
 
     run_git("init", "--initial-branch=main")
     # Set locally, never with --global: this must not touch the user's own
@@ -125,7 +161,71 @@ def reset_policy_repo() -> None:
     # HEAD is "unborn" and some git commands behave differently.
     run_git("commit", "--allow-empty", "-m", "Initialise policy repository")
 
-    print(f"  initialised {POLICY_REPO}")
+    print(f"  initialised {repo}")
+
+
+def seed_policy_files(conn) -> None:
+    """Write the sample policies to Git, then record them in the database.
+
+    Deliberately done here rather than in seed.sql. Each metadata row carries
+    the commit SHA its content was stored in, and SQL cannot create Git
+    commits -- rows seeded there would reference commits that do not exist, so
+    the two stores would be inconsistent from initialisation.
+
+    The order matches the upload endpoint: validate, write to Git, then insert
+    the row. Content is committed before it becomes visible, so a failure part
+    way through leaves unreferenced content rather than a listed file with
+    nothing behind it. See DESIGN.md decision 1.
+    """
+    samples = sorted(SAMPLES_DIR.rglob("*.cedar"))
+    if not samples:
+        raise RuntimeError(f"no sample policies found in {SAMPLES_DIR}")
+
+    for sample in samples:
+        # The path under sample-policies/ *is* the path in the repository.
+        customer, tenant, filename = sample.relative_to(SAMPLES_DIR).parts
+        email = UPLOADER_BY_CUSTOMER[customer]
+        content = sample.read_bytes()
+
+        # Same validation the API applies, so a broken sample fails here
+        # rather than being served to the interface.
+        validate_policy_bytes(content)
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT t.id AS tenant_id, u.id AS user_id
+                FROM tenants t
+                JOIN customers c ON c.id = t.customer_id
+                JOIN users u ON u.email = %s
+                WHERE c.folder_name = %s AND t.folder_name = %s
+                """,
+                (email, customer, tenant),
+            )
+            row = cur.fetchone()
+
+        if row is None:
+            raise RuntimeError(f"no such tenant or user: {customer}/{tenant}, {email}")
+
+        tenant_id, user_id = row
+
+        git_path = git_repo.build_path(customer, tenant, filename)
+        commit_sha = git_repo.write_file(
+            git_path, content, f"Add {filename} to {customer}/{tenant} (by {email})"
+        )
+
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO policy_files
+                    (tenant_id, filename, git_path, commit_sha, size_bytes, uploaded_by)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                """,
+                (tenant_id, filename, git_path, commit_sha, len(content), user_id),
+            )
+        conn.commit()
+
+    print(f"  seeded {len(samples)} sample policy files")
 
 
 def main() -> int:
@@ -143,7 +243,12 @@ def main() -> int:
                 run_sql_file(cur, SCHEMA_FILE)
                 run_sql_file(cur, SEED_FILE)
                 summarise(cur)
+
+        # The repository must exist before any content can be committed to it.
         reset_policy_repo()
+
+        with psycopg.connect(dsn) as conn:
+            seed_policy_files(conn)
     except Exception as exc:
         print(f"\nFailed: {exc}", file=sys.stderr)
         return 1
