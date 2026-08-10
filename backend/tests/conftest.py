@@ -18,6 +18,7 @@ from pathlib import Path
 
 import psycopg
 import pytest
+from psycopg.conninfo import conninfo_to_dict
 from psycopg.rows import dict_row
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -89,11 +90,28 @@ def read_fixture(name: str) -> bytes:
 
 @pytest.fixture(scope="session", autouse=True)
 def require_test_database():
-    """Fail once, with instructions, if the test database is missing.
+    """Refuse to run against anything but a test database, and fail early.
 
-    Without this every test fails with the same connection error and the real
-    cause is buried.
+    Two protections, both session-wide:
+
+    1. The target database name must end in `_test`. Every test drops and
+       recreates all tables, so pointing TEST_DATABASE_URL at the development
+       database -- by habit, a stale shell variable, or a typo -- would destroy
+       real data. Refusing outright is cheaper than trusting care.
+
+    2. If the database is unreachable, exit once with instructions. Otherwise
+       every test fails with the same connection error and the real cause is
+       buried.
     """
+    dbname = conninfo_to_dict(TEST_DSN).get("dbname", "")
+    if not dbname.endswith("_test"):
+        pytest.exit(
+            f"\nRefusing to run: '{dbname}' is not a test database.\n"
+            "The suite drops and recreates every table before each test.\n"
+            "Point TEST_DATABASE_URL at a database whose name ends in '_test'.\n",
+            returncode=1,
+        )
+
     try:
         psycopg.connect(TEST_DSN, connect_timeout=3).close()
     except psycopg.OperationalError as exc:
@@ -105,6 +123,25 @@ def require_test_database():
             "  docker exec smartverify-db createdb -U policy smartverify_test\n",
             returncode=1,
         )
+
+
+@pytest.fixture(scope="session", autouse=True)
+def never_touch_the_development_repo(tmp_path_factory):
+    """Point POLICY_REPO_PATH away from data/policy-repo for the whole session.
+
+    `policy_repo` overrides this per test for anything that needs a working
+    repository. This is the floor beneath it: without it, a test that reached
+    git_repo without requesting that fixture would fall back to the real
+    development repository and write to it.
+
+    The fallback directory is deliberately *not* a Git repository, so such a
+    test fails loudly with "not a git repository" instead of quietly succeeding
+    somewhere harmless -- the missing fixture is the actual bug.
+    """
+    fallback = tmp_path_factory.mktemp("no-policy-repo-requested")
+    os.environ["POLICY_REPO_PATH"] = str(fallback)
+    yield
+    os.environ.pop("POLICY_REPO_PATH", None)
 
 
 @pytest.fixture(autouse=True)
