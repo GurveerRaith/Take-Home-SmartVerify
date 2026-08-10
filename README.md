@@ -18,7 +18,7 @@ is scoped per tenant.
 | Git storage layer | Done        |
 | Backend API       | Done        |
 | Tests             | Done        |
-| Frontend          | In progress — scaffold and API client done |
+| Frontend          | Done        |
 
 ---
 
