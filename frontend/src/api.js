@@ -23,7 +23,15 @@ async function toError(response) {
     // A response with no JSON body, e.g. a proxy error page.
   }
 
-  const error = new Error(detail || `Request failed (${response.status})`);
+  // Errors raised by the application put a plain string in `detail`. FastAPI's
+  // own request-validation errors put an array of field objects there instead,
+  // which is not worth showing a user -- fall back to the status in that case.
+  const message =
+    typeof detail === "string" && detail.trim() !== ""
+      ? detail
+      : `Request failed (${response.status})`;
+
+  const error = new Error(message);
   error.status = response.status;
   return error;
 }
@@ -121,8 +129,13 @@ function filenameFromResponse(response) {
   const disposition = response.headers.get("Content-Disposition");
   if (!disposition) return null;
 
-  const match = disposition.match(/filename="([^"]+)"/);
-  return match ? match[1] : null;
+  // Quoted form is what this API sends. The unquoted fallback keeps the parse
+  // working if the header is ever produced differently.
+  const quoted = disposition.match(/filename="([^"]*)"/);
+  if (quoted) return quoted[1] || null;
+
+  const unquoted = disposition.match(/filename=([^;]+)/);
+  return unquoted ? unquoted[1].trim() : null;
 }
 
 function saveBlob(blob, filename) {
@@ -135,6 +148,9 @@ function saveBlob(blob, filename) {
   link.click();
   link.remove();
 
-  // The object URL pins the blob in memory until it is released.
-  URL.revokeObjectURL(url);
+  // The object URL pins the blob in memory, so it has to be released -- but
+  // not immediately. Revoking in the same tick as click() races the browser
+  // reading the blob, which can make the download fail or save under the
+  // wrong name. Deferring to a later task lets the download start first.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
