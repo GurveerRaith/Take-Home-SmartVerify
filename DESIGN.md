@@ -32,16 +32,16 @@ Each entry states what was considered, what was chosen, why, and what it costs.
 | --- | --------------------- | ------------------------------------- | ------------------------------- |
 | 1   | Write ordering        | Git first, Postgres second            | Metadata first; 2PC             |
 | 2   | Isolation enforcement | Shared auth dependency + query filter | Per-endpoint checks; RLS        |
-| 3                       | Denying access        | 404                                  | 403                              |
-| 4                       | Cross-customer grants | Guard inside the seed transaction    | Composite foreign key            |
-| 5                       | Reading content       | By `commit_sha`                      | From the working tree            |
-| 6                       | Delete                | Soft delete + `git rm`               | Hard delete                      |
-| 7                       | Filename uniqueness   | Partial unique index                 | Plain unique constraint          |
-| 8                       | Path safety           | `CHECK` constraints + app validation | App validation only              |
-| 9                       | FK delete behaviour   | Chosen per relationship              | Uniform `CASCADE`; all defaults  |
-| 10                      | Cedar validation      | Parse-level + non-empty check        | Schema validation                |
-| 11                      | Authentication        | Seeded plaintext bearer tokens       | JWT + login; hashed tokens       |
-| 12                      | Schema management     | Re-runnable init script              | Alembic migrations               |
+| 3   | Denying access        | 404                                   | 403                             |
+| 4   | Cross-customer grants | Guard inside the seed transaction     | Composite foreign key           |
+| 5   | Reading content       | By `commit_sha`                       | From the working tree           |
+| 6   | Delete                | Soft delete + `git rm`                | Hard delete                     |
+| 7   | Filename uniqueness   | Partial unique index                  | Plain unique constraint         |
+| 8   | Path safety           | `CHECK` constraints + app validation  | App validation only             |
+| 9   | FK delete behaviour   | Chosen per relationship               | Uniform `CASCADE`; all defaults |
+| 10  | Cedar validation      | Parse-level + non-empty check         | Schema validation               |
+| 11  | Authentication        | Seeded plaintext bearer tokens        | JWT + login; hashed tokens      |
+| 12  | Schema management     | Re-runnable init script               | Alembic migrations              |
 | 13  | Primary keys          | UUID                                  | `BIGSERIAL`                     |
 | 14  | Database connections  | One per request                       | Connection pool                 |
 | 15  | API response shape    | A projection, enforced by a model     | Returning the row               |
@@ -250,7 +250,7 @@ schema that does not exist is not possible, so this is out of scope rather than
 skipped.
 
 The second check exists because an empty, whitespace-only or comments-only file
-is *valid* Cedar: it parses to an empty policy set. Accepting one would store a
+is _valid_ Cedar: it parses to an empty policy set. Accepting one would store a
 policy file that grants and forbids nothing. Verified and logged as BUG-04.
 
 **Cost:** Two limitations, both known. A policy that parses but references
@@ -331,7 +331,7 @@ commits when a request succeeds and rolls back when it raises, so no route
 manages transactions itself.
 
 FastAPI caches dependency results within a request, so a route depending on both
-`get_tenant_scope` and `get_connection` receives the *same* connection, not two.
+`get_tenant_scope` and `get_connection` receives the _same_ connection, not two.
 
 **Cost:** A connection is established per request, which would matter under
 load. Moving to a pool is a change to one function.
@@ -350,7 +350,7 @@ that files live at `{customer}/{tenant}/{file}` is free information for anyone
 probing for traversal — and would tie the API contract to the schema, so a
 column rename would break clients.
 
-The mechanism matters as much as the intent: FastAPI *strips* any field absent
+The mechanism matters as much as the intent: FastAPI _strips_ any field absent
 from the model, so a query that starts selecting `git_path` cannot leak it by
 accident. The rule is enforced rather than remembered.
 
@@ -430,7 +430,7 @@ those exist to catch specific defects nothing else would: T-04 fails if
 authorisation is done by customer rather than by tenant grant, and T-06 fails if
 a file is looked up by id without its tenant.
 
-The database is rebuilt before *every* test rather than once per session. It is
+The database is rebuilt before _every_ test rather than once per session. It is
 slower, but it is what makes the suite order-independent — without it a test
 that deletes rows changes the result of whatever runs next.
 
@@ -457,3 +457,119 @@ Features that were evaluated and left out, with the reasoning:
   `role` column would imply an authorization model that was not built.
 - **`updated_at` on `policy_files`.** Rows are inserted and soft-deleted, never
   updated. A column that never changes is misleading.
+
+## Additional features to extend this project by
+
+These are features that I did not implement, but they are potential next steps if this project were to be developed further
+
+### 1. Policy File Rollbacks from Previous Versions
+
+Being able to rollback to previous versions of policy files would be really good because it acts as an instant safety net, allowing teams to undo bad permission changes, stop accidental security lockouts, or fix syntax logic errors by reverting to a known working version without downtime
+
+Having a history shown of file content would also make sense, something similar to Github where the user could see how the file looked like at certain commits in time.
+
+### 2. Caching Policy File Content
+
+Every download currently shells out to `git show <commit_sha>:<path>`, which
+spawns a process. Measured on this machine, that is a median of **8.8 ms** per
+read, against **0.4 ms** for the tenant authorisation query and effectively zero
+for an in-memory lookup. Reading content is by far the most expensive thing the
+service does, and it is the one thing that is trivially cacheable.
+
+What makes it trivial is a property that falls out of decision 5. Content is
+addressed by commit SHA, and a commit is immutable — the bytes at
+`(commit_sha, git_path)` can never change. Cache invalidation, normally the hard
+part of caching, simply does not arise: there is no event that makes an entry
+wrong. Entries are evicted for space, never for staleness. A cache keyed on a
+mutable identifier such as the file id would need invalidating on every upload
+and delete; keyed on the commit SHA, it needs nothing.
+
+I would add it in two layers:
+
+**In-process cache.** An LRU keyed on `(commit_sha, git_path)`, bounded by total
+bytes rather than entry count, since policy files vary in size. Roughly ten lines
+around `git_repo.read_file`. Policy files are small and re-read far more often
+than they are written, so a small cache would serve most reads.
+
+**HTTP caching.** Because the content is immutable, the download response can
+carry `ETag: <commit_sha>` and `Cache-Control: private, max-age=31536000,
+immutable`. A browser that has already downloaded a file would not request it
+again, removing the round trip entirely rather than just making it faster.
+
+`private` is essential rather than cosmetic. These responses are authorised per
+tenant, so a shared cache — a corporate proxy, a CDN — must never be allowed to
+store one and serve it to a different tenant. That would defeat the isolation
+model outside the application entirely, which is exactly the kind of failure that
+does not show up in tests of the application itself.
+
+**What I would not cache** is the authorisation lookup in `get_tenant_scope`,
+even though it runs on every single request and is the obvious candidate. It
+costs 0.4 ms, so there is little to win — and caching it would mean a revoked
+tenant grant continued to work until the entry expired. Decision 11 deliberately
+reads grants from the database per request so that revocation takes effect
+immediately; caching them would trade a security property for a fifth of a
+millisecond. The file list is similar: Postgres already serves it from an index,
+and a cache would need invalidating on every upload and delete, which is real
+complexity for no measurable gain.
+
+That contrast is the interesting part of this feature. The naive instinct is to
+cache the thing that runs most often; the right answer here is to cache the thing
+that is most expensive and immutable, and to leave the cheap, security-
+sensitive, mutable thing alone.
+
+### 3. Cedar Schema Validation Per Tenant
+
+Validation today is parse-level only, which decision 10 records as a deliberate
+limitation rather than an oversight: checking that a policy refers to entity
+types and actions that actually exist requires a Cedar schema, and the
+requirements never describe one or provide a way to supply it.
+
+The gap this leaves is real. A policy containing a typo parses perfectly and is
+accepted, but does nothing:
+
+```
+permit(principal == User::"alice", action == Action::"veiw", resource == Folder::"reports");
+```
+
+`Action::"veiw"` is valid Cedar syntax. It is also a permission that will never
+match anything, and the current service will happily store it and show it in the
+list as a healthy file. Silently ineffective authorisation rules are arguably
+worse than rules that are obviously broken.
+
+Adding a schema closes it. `cedarpy` already exposes
+`validate_policies(policies, schema)`, which returns a result carrying specific
+errors — for the policy above it reports
+`unrecognized action `Action::"veiw"`` — so the message shown to the user would
+be as actionable as the parse errors already are.
+
+**Where the schema would live.** A tenant's schema is itself a file with content
+and history, so Git is the natural home, stored beside the policies it governs
+at `{customer}/{tenant}/schema.cedarschema`. That is consistent with the existing
+storage model and gives schema changes the same audit trail as policy changes.
+
+It does collide with an existing constraint, which is worth stating rather than
+glossing over: `policy_files_filename_format` requires names ending in `.cedar`,
+so a schema file could not be stored through the current upload path. It would
+need either a separate endpoint and table, or a widened constraint plus a column
+distinguishing a schema from a policy. I would prefer the separate endpoint —
+a schema is a different kind of object with a different lifecycle, and one per
+tenant rather than many.
+
+**Validation would have to be optional.** A tenant with no schema must keep
+working exactly as it does now, falling back to parse-only validation. Making it
+mandatory would break every existing tenant, and would force customers to model
+their entire entity hierarchy before uploading a single policy.
+
+**The hard part is not the validation, it is the drift.** Policies are validated
+on upload against the schema as it stood at that moment. If the schema is later
+changed — an action renamed, an entity type removed — policies that were valid
+when stored silently become invalid, and nothing would notice. Options I would
+weigh: re-validate every policy in a tenant whenever its schema is replaced and
+refuse the change if any would break; or accept the change and surface affected
+files as warnings in the list. The first is safer, the second is more usable, and
+the right answer probably depends on whether a customer is expected to fix
+policies before or after a schema migration.
+
+That question — what happens to stored data when the rules that validated it
+change — is the genuinely interesting design problem here, and it is the reason
+this is a larger piece of work than "call one more library function on upload".
