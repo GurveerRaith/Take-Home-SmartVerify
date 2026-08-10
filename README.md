@@ -18,16 +18,19 @@ is scoped per tenant.
 | Git storage layer | Done        |
 | Backend API       | Done        |
 | Tests             | Done        |
-| Frontend          | Not started |
+| Frontend          | In progress — scaffold and API client done |
 
 ---
 
 ## Quick start
 
-**Prerequisites:** Docker Desktop and Python 3.11+ (developed against 3.14).
-`psql` is not needed — the container provides it.
+**Prerequisites:** Docker Desktop, Python 3.11+ (developed against 3.14), and
+Node 20+ (developed against 23). `psql` is not needed — the container provides
+it.
 
-**Run every command from the repository root.**
+**Run every command from the repository root unless stated otherwise.**
+
+Steps 6 and 7 each occupy a terminal, so you will need three in total.
 
 **1. Create and activate a virtual environment.**
 
@@ -83,8 +86,37 @@ curl localhost:8000/api/health
 Should return `{"status":"ok"}`. Interactive API docs are at
 <http://localhost:8000/docs>.
 
-Stop the server with `Ctrl+C` in its terminal. If it has been left running in
-the background, `pkill -f uvicorn` will stop it.
+Leave this running and open a new terminal for the next step.
+
+**7. Start the frontend.**
+
+```bash
+cd frontend && npm install
+```
+
+```bash
+npm run dev
+```
+
+Open <http://localhost:5173>. Sign in with any seeded token — `alice_token`,
+`bob_token` or `carol_token` (see [Seeded data](#seeded-data)).
+
+The frontend calls the API directly at `http://localhost:8000`, which the API
+permits by naming the Vite origin in its CORS configuration. Override the API
+location with `VITE_API_URL` if you run it elsewhere.
+
+Both servers hot reload: `--reload` restarts the API when Python changes, and
+Vite swaps modules on save.
+
+### Stopping
+
+`Ctrl+C` in each terminal. If either is left running in the background:
+
+```bash
+pkill -f uvicorn && pkill -f vite
+```
+
+PostgreSQL keeps running until stopped separately — see [Stopping](#stopping-1).
 
 ---
 
@@ -275,16 +307,29 @@ somewhere other than the repository root.
 ```
 backend/
   app/
+    main.py           app, CORS, /api/health, /api/me
+    auth.py           token -> user, and the tenant scope guard
+    policies.py       upload, list, download, delete
     cedar.py          Cedar policy validation
+    git_repo.py       reads and writes the policy Git repository
+    db.py             database connection dependency
   db/
     schema.sql        tables, constraints, indexes
     seed.sql          customers, tenants, users, grants
   scripts/
     init_dev.py       resets the database and the policy repo
   tests/
+    conftest.py       fixtures, seeded constants, helpers
+    test_*.py         57 cases across 5 files
     fixtures/         valid and invalid .cedar files
   requirements.txt
-frontend/             React UI (not yet implemented)
+frontend/
+  src/
+    api.js            every backend call, in one place
+    App.jsx           application shell
+    main.jsx          entry point
+    index.css         styles
+  package.json
 data/
   policy-repo/        Git repo holding policy content (runtime, not committed)
 docker-compose.yml    PostgreSQL service
